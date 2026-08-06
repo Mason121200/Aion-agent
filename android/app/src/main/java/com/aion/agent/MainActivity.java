@@ -10,6 +10,7 @@ import android.view.View;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -42,6 +43,7 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private SharedPreferences prefs;
     private volatile boolean engineReady = false;
+    private volatile String lastHealthError = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -138,15 +140,16 @@ public class MainActivity extends Activity {
                                 statusText.setText("本地引擎已就绪（数据保存在本机）");
                                 webView.loadUrl(LOCAL_URL);
                             } else {
-                                statusText.setText("本地引擎启动超时，请重启应用");
+                                statusText.setText("本地引擎启动超时: " + lastHealthError + "（请重启应用）");
                             }
                         }
                     });
                 } catch (final Exception e) {
+                    Log.e("AionAgent", "startLocalEngine failed", e);
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
-                            statusText.setText("启动异常: " + e.getMessage());
+                            statusText.setText("启动异常: " + e);
                         }
                     });
                 }
@@ -164,6 +167,7 @@ public class MainActivity extends Activity {
             conn.disconnect();
             return code == 200;
         } catch (Exception e) {
+            lastHealthError = String.valueOf(e.getMessage());
             return false;
         }
     }

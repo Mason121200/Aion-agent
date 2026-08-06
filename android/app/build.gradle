@@ -25,7 +25,8 @@ android {
     sourceSets {
         main {
             python {
-                srcDir "../../aion_agent"
+                srcDir "../.."
+                include "aion_agent/**"
             }
         }
     }
