@@ -29,6 +29,22 @@ from aion_agent.core.ports.i_llm_client import ILLMClient, LLMResponse, StreamCh
 logger = logging.getLogger(__name__)
 
 
+def _coerce_usage(usage_raw: Optional[dict]) -> Optional[dict]:
+    """Coerce usage values: scalars to int, nested dicts (e.g. *_tokens_details) kept as-is."""
+    if not isinstance(usage_raw, dict):
+        return None
+    usage = {}
+    for k, v in usage_raw.items():
+        if isinstance(v, dict):
+            usage[k] = v
+        else:
+            try:
+                usage[k] = int(v or 0)
+            except (TypeError, ValueError):
+                usage[k] = v
+    return usage
+
+
 def load_env_from_dotenv(path: str | Path = ".env") -> None:
     """极简 .env 加载器（仅在变量未设置时写入 os.environ）"""
     p = Path(path)
@@ -273,9 +289,7 @@ class OpenAICompatibleClient(ILLMClient):
 
         usage = data.get("usage") or {}
         if isinstance(usage, dict):
-            usage = {
-                k: int(v or 0) for k, v in usage.items()
-            }
+            usage = _coerce_usage(usage) or {}
 
         return LLMResponse(
             content=message.get("content") or "",
@@ -375,7 +389,7 @@ class OpenAICompatibleClient(ILLMClient):
                 usage_raw = data.get("usage")
                 usage = None
                 if usage_raw:
-                    usage = {k: int(v or 0) for k, v in usage_raw.items()}
+                    usage = _coerce_usage(usage_raw)
                 yield StreamChunk(
                     content="", reasoning="", is_final=True,
                     tool_calls=parsed or None, usage=usage,

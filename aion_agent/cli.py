@@ -199,9 +199,7 @@ async def _chat_loop(session) -> None:
         try:
             async for event in session.react_stream(msg):
                 event_type = event.get("type")
-                if event_type == "reasoning":
-                    print(f"\n  🤔 {event.get('content', '')}", end="", flush=True)
-                elif event_type == "token":
+                if event_type == "token":
                     print(event.get("content", ""), end="", flush=True)
                 elif event_type == "tool_call":
                     name = event.get("name", "")

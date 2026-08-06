@@ -4,6 +4,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import asyncio
 import pytest
 
 from aion_agent.llm.openai_compatible import OpenAICompatibleClient, get_config, get_config
@@ -42,6 +43,24 @@ class _Handler(BaseHTTPRequestHandler):
                 'data: {"choices":[{"text":"B"}]}\n\n'
                 "data: [DONE]\n\n"
             )
+        elif self.mode == "stream-usage":
+            payload = (
+                'data: {"choices":[{"delta":{"content":"好"}}]}\n\n'
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+                '"usage":{"prompt_tokens":5,"completion_tokens":3,'
+                '"total_tokens":8,"prompt_tokens_details":{"cached_tokens":2}}}\n\n'
+                "data: [DONE]\n\n"
+            )
+        elif self.mode == "chat-usage":
+            payload = json.dumps({
+                "choices": [{"message": {"content": "hi"}}],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                    "completion_tokens_details": {"reasoning_tokens": 1},
+                },
+            })
         else:
             payload = json.dumps({
                 "choices": [{"message": {"content": "你好，我是助手"}}]
@@ -52,7 +71,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Type",
             "text/event-stream"
-            if self.mode in ("stream", "text-delta")
+            if self.mode in ("stream", "text-delta", "stream-usage")
             else "application/json",
         )
         self.send_header("Content-Length", str(len(data)))
@@ -148,3 +167,32 @@ class TestDefaults:
         assert cfg["base_url"] == "https://api.deepseek.com/v1"
         assert cfg["model"] == "deepseek-v4-flash"
         assert cfg["api_key"] == ""
+
+
+class TestUsageParsing:
+    def test_stream_usage_with_nested_details(self, server):
+        """usage 中嵌套 dict（如 prompt_tokens_details）不应导致崩溃"""
+        _Handler.mode = "stream-usage"
+        chunks = []
+
+        async def _collect():
+            async for c in _client(server).stream(
+                [{"role": "user", "content": "hi"}]
+            ):
+                chunks.append(c)
+
+        asyncio.run(_collect())
+        final = [c for c in chunks if c.is_final][-1]
+        assert final.usage["total_tokens"] == 8
+        assert final.usage["prompt_tokens"] == 5
+        assert final.usage["prompt_tokens_details"]["cached_tokens"] == 2
+
+    def test_complete_usage_with_nested_details(self, server):
+        """非流式 complete() 同样兼容嵌套 usage"""
+        _Handler.mode = "chat-usage"
+        resp = asyncio.run(
+            _client(server).complete([{"role": "user", "content": "hi"}])
+        )
+        assert resp.usage["total_tokens"] == 3
+        assert resp.usage["completion_tokens_details"]["reasoning_tokens"] == 1
+
