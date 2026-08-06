@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -18,12 +19,21 @@ from aion_agent.pipeline.cognition_pipeline import CognitionPipeline
 from aion_agent.storage.hash_embedder import HashEmbedder
 from aion_agent.storage.in_memory_cognitive_repo import InMemoryCognitiveRepo
 from aion_agent.use_cases.cognition_handler import process_cognition_block
+from aion_agent.llm.embedding import build_embedder
 from aion_agent.use_cases.cognition_injector import CognitionInjector
 
 USER_ID = "demo_user"
 
-# 演示数据目录：aion_agent/data/demo_vector
-_DEMO_DIR = Path(__file__).resolve().parent / "data" / "demo_vector"
+def _default_data_dir() -> Path:
+    """用户可写的数据目录：默认 ~/.aion_agent，可用 AION_DATA_DIR 覆盖
+
+    打包成 exe / pip 安装后，包内目录不可写或指向临时解包目录，
+    因此所有持久化数据统一放到用户主目录。
+    """
+    override = os.environ.get("AION_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".aion_agent"
 
 
 def _ensure_utf8_stdio() -> None:
@@ -139,14 +149,16 @@ async def _run_demo(repo, pipeline, injector) -> None:
 def run_demo(reset: bool = True) -> int:
     """运行认知闭环演示"""
     _ensure_utf8_stdio()
+    demo_dir = _default_data_dir() / "demo_vector"
     if reset:
-        shutil.rmtree(_DEMO_DIR, ignore_errors=True)
+        shutil.rmtree(demo_dir, ignore_errors=True)
 
+    embedder = build_embedder()
     repo = InMemoryCognitiveRepo(
-        embedder=HashEmbedder(),
-        persist_dir=_DEMO_DIR,
+        embedder=embedder,
+        persist_dir=demo_dir,
     )
-    pipeline = CognitionPipeline(cognitive_repo=repo)
+    pipeline = CognitionPipeline(cognitive_repo=repo, embedder=embedder)
     injector = CognitionInjector(repo, token_budget=2000)
 
     asyncio.run(_run_demo(repo, pipeline, injector))
@@ -161,8 +173,9 @@ async def _extract_file(path: str, user_id: str) -> None:
     text = Path(path).read_text(encoding="utf-8")
     chunks = [text[i:i + 64] for i in range(0, len(text), 64)]
 
-    repo = InMemoryCognitiveRepo(embedder=HashEmbedder())
-    pipeline = CognitionPipeline(cognitive_repo=repo)
+    embedder = build_embedder()
+    repo = InMemoryCognitiveRepo(embedder=embedder)
+    pipeline = CognitionPipeline(cognitive_repo=repo, embedder=embedder)
 
     visible_chunks, result = await pipeline.process_stream(chunks, user_id)
 
@@ -179,7 +192,40 @@ async def _extract_file(path: str, user_id: str) -> None:
 
 # ==================== chat：ReAct 对话体验 ====================
 
+# 认知工具：写入/修正在 CLI 中以自然语言提示，搜索类完全静默
+_COGNITION_TOOL_NAMES = {
+    "search_cognition", "search_by_relation", "search_entity", "search_notes",
+    "create_cognition", "update_cognition", "delete_cognition",
+    "merge_cognition", "confirm_cognition",
+}
+
+
+def _cognition_tool_hint(name: str, args: dict) -> str:
+    """把认知工具的调用转成一行自然语言提示（返回空串表示静默）"""
+    if name == "create_cognition":
+        text = (
+            f"{args.get('subject', '')}{args.get('predicate', '')}"
+            f"{args.get('object', '')}"
+        ).strip()
+        return f"🧠 已记住：{text}" if text else "🧠 已记住一条新记忆"
+    if name == "update_cognition":
+        parts = [
+            f"{f}={args[f]}" for f in ("subject", "predicate", "object")
+            if args.get(f)
+        ]
+        return f"🧠 已更新记忆（{', '.join(parts) or '字段'}）"
+    if name == "delete_cognition":
+        return "🧠 已删除一条记忆"
+    if name == "merge_cognition":
+        return "🧠 已合并两条重复记忆"
+    if name == "confirm_cognition":
+        return "🧠 已确认这条记忆正确"
+    return ""
+
+
 async def _chat_loop(session) -> None:
+    print("我是 Aion Agent —— 有长期记忆的 AI 助手。")
+    print("告诉我你的名字或偏好，我会记住你，并在以后的对话里自然想起。")
     print("输入消息开始对话（输入 quit / exit / 退出 结束）：")
     while True:
         try:
@@ -196,6 +242,7 @@ async def _chat_loop(session) -> None:
 
         print("助手 > ", end="", flush=True)
         totals = {"triples": 0, "states": 0, "notes": 0, "skipped": 0, "total": 0}
+        records = []
         try:
             async for event in session.react_stream(msg):
                 event_type = event.get("type")
@@ -204,17 +251,22 @@ async def _chat_loop(session) -> None:
                 elif event_type == "tool_call":
                     name = event.get("name", "")
                     args = event.get("args") or {}
-                    arg_text = ", ".join(
-                        f"{k}={v}" for k, v in args.items()
-                    ) if isinstance(args, dict) else str(args)
-                    print(f"\n  🛠️ 调用工具: {name}({arg_text})", flush=True)
+                    hint = _cognition_tool_hint(name, args)
+                    if hint:
+                        print(f"\n{hint}", flush=True)
+                    elif name not in _COGNITION_TOOL_NAMES:
+                        arg_text = ", ".join(
+                            f"{k}={v}" for k, v in args.items()
+                        ) if isinstance(args, dict) else str(args)
+                        print(f"\n  🛠️ 调用工具: {name}({arg_text})", flush=True)
                 elif event_type == "tool_result":
                     tc = event.get("tool_call") or {}
-                    ok = tc.get("success", False)
-                    content = (
-                        str(tc.get("data") or tc.get("error") or "")[:160]
-                    )
-                    print(f"  {'✅' if ok else '❌'} 观察结果: {content}", flush=True)
+                    if tc.get("name") not in _COGNITION_TOOL_NAMES:
+                        ok = tc.get("success", False)
+                        content = (
+                            str(tc.get("data") or tc.get("error") or "")[:160]
+                        )
+                        print(f"  {'✅' if ok else '❌'} 观察结果: {content}", flush=True)
                 elif event_type == "reflect":
                     print(
                         f"  🔄 反思: {event.get('reason', '')}",
@@ -227,6 +279,7 @@ async def _chat_loop(session) -> None:
                 elif event_type == "cognition":
                     for key in totals:
                         totals[key] += event.get(key, 0)
+                    records.extend(event.get("records", []))
                 elif event_type == "error":
                     print(f"\n[出错] {event.get('error', '')}", flush=True)
                 elif event_type == "final":
@@ -240,12 +293,9 @@ async def _chat_loop(session) -> None:
             continue
         print()
         if totals["total"] > 0:
-            print(
-                f"  🧠 记忆沉淀：+{totals['triples']} 三元组 / "
-                f"+{totals['states']} 状态 / +{totals['notes']} 笔记"
-                f"（跳过 {totals['skipped']}）"
-            )
-            print("  （下一轮提问时，这些记忆会自动注入，试试「我叫什么？」）")
+            record_text = "；".join(records) if records else f"共 {totals['total']} 条"
+            skip_note = f"（跳过 {totals['skipped']}）" if totals["skipped"] else ""
+            print(f"  🧠 已记录 {totals['total']} 条：{record_text}{skip_note}")
 
 
 def cmd_chat(args) -> int:
@@ -269,9 +319,10 @@ def cmd_chat(args) -> int:
         print("   https://api.deepseek.com/v1  /  deepseek-v4-flash）")
         return 1
 
+    embedder = build_embedder()
     repo = InMemoryCognitiveRepo(
-        embedder=HashEmbedder(),
-        persist_dir=Path(__file__).resolve().parent / "data" / "chat",
+        embedder=embedder,
+        persist_dir=_default_data_dir() / "chat",
     )
     llm = OpenAICompatibleClient(
         api_key=cfg["api_key"],
@@ -298,6 +349,96 @@ def cmd_chat(args) -> int:
     print(f"步数上限: {session._max_steps}  |  Token 预算: {session._max_tokens_budget}")
     print("=" * 60)
     asyncio.run(_chat_loop(session))
+    return 0
+
+
+def _run_interactive_menu() -> int:
+    """无参数启动（如双击 exe）时的交互菜单：避免控制台一闪而过"""
+    print("=" * 60)
+    print("Aion Agent —— 认知 MVP")
+    print("1. 开始对话（chat，需在 .env 配置 LLM 接口）")
+    print("2. 离线演示（demo，无 LLM 也可跑）")
+    print("3. 启动本地服务（Web UI，电脑/手机浏览器可访问）")
+    print("4. 退出")
+    print("=" * 60)
+    while True:
+        try:
+            choice = input("请选择 [1/2/3/4] > ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n再见！")
+            return 0
+        if choice == "1":
+            code = cmd_chat(argparse.Namespace(
+                user="chat_user", no_tools=False,
+                max_steps=8, token_budget=8000,
+            ))
+            break
+        if choice == "2":
+            code = run_demo()
+            break
+        if choice == "3":
+            code = cmd_serve(argparse.Namespace(
+                host="0.0.0.0", port=8000, no_browser=False,
+            ))
+            break
+        if choice == "4":
+            return 0
+        print("无效输入，请重新选择。")
+    input("\n按回车键退出...")
+    return code
+
+
+def cmd_serve(args) -> int:
+    """启动本地服务：Web UI（桌面浏览器 + 手机同局域网访问）"""
+    _ensure_utf8_stdio()
+    from aion_agent.server.app import run_server
+
+    run_server(host=args.host, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
+def cmd_app(args) -> int:
+    """桌面应用模式：后台启动本地服务 + 原生窗口（pywebview），缺依赖回退浏览器"""
+    _ensure_utf8_stdio()
+    import time
+    import urllib.request
+
+    from aion_agent.server.app import run_server_in_background
+
+    port = args.port or 8000
+    run_server_in_background(host="127.0.0.1", port=port)
+    url = f"http://127.0.0.1:{port}"
+
+    # 等待服务就绪
+    for _ in range(100):
+        try:
+            urllib.request.urlopen(url + "/api/health", timeout=1)
+            break
+        except Exception:
+            time.sleep(0.2)
+
+    print(f"  本地服务: {url}")
+    try:
+        import webview
+
+        webview.create_window(
+            "Aion Agent",
+            url,
+            width=1100,
+            height=760,
+            min_size=(380, 600),
+        )
+        webview.start()
+    except Exception as e:  # noqa: BLE001
+        print(f"[app] 原生窗口不可用（{e}），改用浏览器打开")
+        import webbrowser
+
+        webbrowser.open(url)
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
     return 0
 
 
@@ -332,6 +473,20 @@ def main(argv=None) -> int:
     ext_p.add_argument("file", help="文本文件路径（UTF-8）")
     ext_p.add_argument("--user", default=USER_ID, help="用户标识")
 
+    serve_p = sub.add_parser(
+        "serve", help="启动本地服务（Web UI，手机可同局域网访问）"
+    )
+    serve_p.add_argument("--host", default="0.0.0.0", help="监听地址")
+    serve_p.add_argument("--port", type=int, default=8000, help="监听端口")
+    serve_p.add_argument(
+        "--no-browser", action="store_true", help="不自动打开浏览器"
+    )
+
+    app_p = sub.add_parser(
+        "app", help="桌面应用模式（原生窗口，缺依赖时自动用浏览器）"
+    )
+    app_p.add_argument("--port", type=int, default=8000, help="本地服务端口")
+
     args = parser.parse_args(argv)
 
     if args.command == "chat":
@@ -341,9 +496,12 @@ def main(argv=None) -> int:
     if args.command == "extract":
         asyncio.run(_extract_file(args.file, args.user))
         return 0
+    if args.command == "serve":
+        return cmd_serve(args)
+    if args.command == "app":
+        return cmd_app(args)
 
-    parser.print_help()
-    return 0
+    return _run_interactive_menu()
 
 
 if __name__ == "__main__":

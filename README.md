@@ -12,8 +12,9 @@
    ▼
 ① MarkdownParseFilter    提取 <!--COGNITION_START/END--> 认知块（流式状态机）
 ② JsonParseFilter        解析 JSON + 容错修复（尾部逗号/单引号）
-③ DimensionSplitFilter   分流：triple / state / note / skip（含快照过滤）
-④ StorageFilter          持久化到认知存储（去重合并）
+③ SemanticDedupFilter    精确 + 语义去重（两两余弦相似度 > 0.85）
+④ DimensionSplitFilter   分流：triple / state / note / skip（含快照过滤）
+⑤ StorageFilter          持久化到认知存储（去重合并）
    │
    ▼
 认知存储 InMemoryCognitiveRepo
@@ -25,6 +26,24 @@
    ▼
 CognitionInjector  RAG 注入（token 预算裁剪）→ System Prompt
 ```
+
+## 认知层（完整实现）
+
+对话中沉淀的记忆不只是「存下来」，agent 还能**主动回忆**与**修正**：
+
+- **主动回忆（4 个搜索工具）**：`search_cognition`（关键词，OR 匹配）、
+  `search_by_relation`（按谓词）、`search_entity`（按实体）、
+  `search_notes`（笔记检索）——ReAct 需要回忆深层记忆时自行调用。
+- **认知写入**：`create_cognition` 显式写三元组，与 COGNITION 标记块互补。
+- **认知修正（4 个修正工具）**：`update_cognition` / `delete_cognition`
+  （软删除）/ `merge_cognition`（合并重复）/ `confirm_cognition`
+  （用户确认 → 置信度 1.0）；所有修改写入**错题本**（correction_log），
+  可通过 `get_correction_stats` 审计。
+- **检索语义**：默认 `HashEmbedder`（离线 n-gram 哈希，零依赖演示）；
+  设置 `AION_EMBEDDING=llm` 后切换为 OpenAI 兼容 `/embeddings` 接口
+  （如 `text-embedding-3-small`），语义去重与向量检索变为真实语义。
+- **语义去重**：`SemanticDedupFilter` 在存储前对认知条目做两两余弦去重
+  （阈值 0.85），与存储层的精确去重（subject/predicate/object）互补。
 
 ## 快速开始
 
@@ -62,7 +81,8 @@ python -m pytest tests -q
 - **Think**：流式输出实时透出，思考链（reasoning）与正文分开；
   回复中的 `<!--COGNITION-->` 块被流式状态机剥离，自动解析、分流、落库。
 - **Act**：模型声明工具调用 → 内置工具执行（`get_current_time` /
-  `calculator` / `read_file`），结果作为 tool 消息喂回下一轮。
+  `calculator` / `read_file` + 9 个认知工具：主动搜索 / 写入 / 修正），
+  结果作为 tool 消息喂回下一轮。
 - **Observe**：`observe.py` 摘要工具结果（>2000 字符截断），失败时
   按错误类型（FileNotFoundError / PermissionError / TimeoutError …）给建议。
 - **Reflect**：`reflect.py` 规则式快路径（无失败→继续，全成功→继续，
@@ -201,6 +221,41 @@ class MyEmbedder:
 | 任务编排 / 双文档协作 / 用户确认 | 暂未移植（路线图） | 下一个移植目标 |
 | 冲突解决 / 合并 / 用户确认 | 暂未移植 | 高级认知操作 |
 
+## 应用化（桌面 + 手机，可直接安装使用）
+
+无需上架应用商店即可分发给他人安装：
+
+- **本地服务（Web UI / PWA）**：`python -m aion_agent serve`
+  - 启动 FastAPI 服务 + 响应式界面，手机与电脑同一 Wi-Fi 下
+    访问 `http://<电脑IP>:8000` 即可使用；Android/iOS 浏览器
+    「添加到主屏幕」可全屏使用（PWA）。
+  - 提供 SSE 流式对话、会话历史、认知记忆查看/删除。
+- **桌面应用**：`python -m aion_agent app`
+  - 后台启动本地服务 + pywebview 原生窗口（缺依赖时自动回退浏览器）。
+- **Windows 单文件 exe**：`aion.spec` + `packaging/launcher.py`
+  - `python -m PyInstaller --clean --noconfirm aion.spec`
+  - 产物 `dist/aion.exe`，双击即用；无参数启动进入交互菜单
+    （1 对话 / 2 演示 / 3 本地服务 / 4 退出）。
+- **Android APK（侧载安装）**：`android/` 为 WebView 壳工程
+  - 推送 `android/**` 后由 GitHub Actions（`.github/workflows/build-apk.yml`）
+    自动构建，在 Actions 页签下载 `aion-agent-apk` 直接安装；
+    打开 App 点右上角「服务器」输入电脑局域网地址即可连接。
+- **数据目录**：默认 `~/.aion_agent`（可用 `AION_DATA_DIR` 覆盖）。
+- **LLM 配置发现**：服务/应用启动时自动从「exe 同目录 / 当前目录 / `~/.aion_agent`」
+  三处查找 `.env`（`AION_LLM_API_KEY` 必填；可选 `AION_LLM_BASE_URL` / `AION_LLM_MODEL`）。
+- **会话管理**：Web UI 顶栏可新建/切换/删除会话，历史与记忆按用户持久化。
+
+### 打包产物与安全策略（重要）
+
+- 重新打包：`python -m PyInstaller --clean --noconfirm aion.spec`，产物 `dist/aion.exe`。
+- exe 未做代码签名。若目标电脑开启了 **Smart App Control（Windows 11 新机默认强制）**，
+  首次运行未签名新 exe 会被拦截（报「应用程序控制策略已阻止此文件」）。
+  处理方式：
+  1. 关闭 Smart App Control（设置 → 隐私和安全性 → Windows 安全中心 →
+     应用和浏览器控制 → Smart App Control → 关闭；注意关闭不可逆）；
+  2. 或购买代码签名证书对 exe 签名后再分发；
+  3. 或直接源码运行（`python -m aion_agent app`），不受影响。
+
 ## 项目结构
 
 ```
@@ -209,11 +264,13 @@ aion_agent/
 ├── pipeline/            # 管道-过滤器：提取 → 解析 → 分流 → 存储
 ├── storage/             # InMemoryCognitiveRepo / JsonChatRepo / NumpyVectorStore
 ├── llm/                 # OpenAI 兼容客户端（stdlib，流式/非流式/工具调用）
+├── server/              # FastAPI 服务 + Web UI（PWA）
 ├── tools/               # 工具注册表 / 执行器 / 内置工具
 └── use_cases/
     ├── react/           # ReAct 循环：react_loop / observe / reflect / context_window
     ├── react_chat_session.py  # ReAct 对话会话（记忆注入 + 窗口管理）
     └── cognition_*.py   # 认知用例（旧 chat 兼容）
+android/                 # Android WebView 壳（GitHub Actions 云构建 APK）
 examples/sample_cognition.txt  # 练习用认知块样例
 tests/                   # 单元测试
 docs/learning_map.md     # 教材第8章「复杂推理」学习对照
@@ -228,6 +285,7 @@ docs/learning_map.md     # 教材第8章「复杂推理」学习对照
 5. ✅ Reflexion 反思闭环（失败时 LLM 反思，回退规则式）
 6. ⏳ 任务编排 / 执行单元验证（参考 zero_code TaskOrchestrator）
 7. ⏳ 认知冲突解决 / 合并 / 用户确认
+8. ✅ 应用化：本地服务（Web UI/PWA） + 桌面壳 + Android APK 云构建
 
 ## License
 

@@ -15,9 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from aion_agent.core.entities.agent_state import AgentState
 from aion_agent.core.entities.cognitive_triple import CognitiveTriple, Dimension
@@ -42,6 +42,22 @@ def _to_iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat() if value else None
 
 
+def _parse_time_range_str(value: Optional[str]) -> Optional[datetime]:
+    """解析时间范围字符串（7d/30d/24h/all）为截止时间"""
+    if not value or str(value).strip().lower() == "all":
+        return None
+    s = str(value).strip().lower()
+    try:
+        num = int("".join(c for c in s if c.isdigit()))
+        if "d" in s:
+            return datetime.now() - timedelta(days=num)
+        if "h" in s:
+            return datetime.now() - timedelta(hours=num)
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
 class InMemoryCognitiveRepo(ICognitiveRepo):
     """内存版认知存储（带去重 + 可选 JSON 落盘）"""
 
@@ -51,6 +67,7 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
         self._dedup_index: Dict[Tuple[str, str, str, str], str] = {}
         self._states: Dict[str, AgentState] = {}
         self._notes: Dict[str, Note] = {}
+        self._correction_log: List[Dict[str, Any]] = []
         self._embedder = embedder
         self._vector_store = (
             NumpyVectorStore(persist_dir=self._persist_dir) if embedder else None
@@ -84,6 +101,9 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
             for nd in data.get("notes", []):
                 note = self._note_from_dict(nd)
                 self._notes[note.note_id] = note
+            for entry in data.get("correction_log", []) or []:
+                if isinstance(entry, dict):
+                    self._correction_log.append(entry)
 
             # 重建向量索引，避免重启后出现孤儿向量
             if self._vector_store:
@@ -109,6 +129,7 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
                 "triples": [self._triple_to_dict(t) for t in self._triples.values()],
                 "states": [self._state_to_dict(s) for s in self._states.values()],
                 "notes": [self._note_to_dict(n) for n in self._notes.values()],
+                "correction_log": list(self._correction_log),
             }
             tmp = pf.with_suffix(".json.tmp")
             tmp.write_text(
@@ -399,6 +420,7 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
             return False
         if soft:
             self._triples[rel_id].is_active = False
+            self._record_correction("delete", rel_id, {"soft": True})
             self._save_persisted()
             return True
         triple = self._triples.pop(rel_id)
@@ -412,6 +434,7 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
                 self._vector_store.delete([rel_id])
             except Exception:
                 pass
+        self._record_correction("delete", rel_id, {"soft": False})
         self._save_persisted()
         return True
 
@@ -428,6 +451,14 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
         triple = self._triples.get(rel_id)
         if triple is None:
             return None
+
+        old_snapshot = {
+            "subject": triple.subject,
+            "predicate": triple.predicate,
+            "object": triple.object,
+            "dimension": triple.dimension.value,
+            "confidence": triple.confidence,
+        }
 
         old_key = (
             triple.subject, triple.predicate,
@@ -453,6 +484,7 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
             self._dedup_index.pop(old_key, None)
             self._dedup_index[new_key] = rel_id
         self._sync_vector(triple)
+        self._record_correction("update", rel_id, {"before": old_snapshot})
         self._save_persisted()
         return triple
 
@@ -534,3 +566,222 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
         ]
         results.sort(key=lambda n: n.created_at, reverse=True)
         return results[:top_k]
+
+
+    # ==================== 认知修正 / 主动搜索（移植自 zero_code） ====================
+
+    def _record_correction(
+        self,
+        operation: str,
+        rel_id: Optional[str] = None,
+        detail: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """记录错题本（审计日志）"""
+        self._correction_log.append({
+            "operation": operation,
+            "rel_id": rel_id,
+            "detail": detail,
+            "created_at": datetime.now().isoformat(),
+        })
+
+    async def merge_triples(
+        self, source_id: str, target_id: str
+    ) -> Optional[CognitiveTriple]:
+        """合并两个三元组：source 软删除，target 置信度取较高值"""
+        source = self._triples.get(source_id)
+        target = self._triples.get(target_id)
+        if source is None:
+            return target
+        if target is None:
+            return source
+        if source_id == target_id:
+            return target
+
+        new_conf = max(source.confidence, target.confidence)
+        target.confidence = new_conf
+        target.is_active = True
+        target.updated_at = datetime.now()
+
+        # 软删除 source 并清理去重索引/向量
+        source.is_active = False
+        source.updated_at = datetime.now()
+        self._dedup_index.pop(
+            (source.subject, source.predicate, source.object, source.user_id),
+            None,
+        )
+        if self._vector_store:
+            try:
+                self._vector_store.delete([source_id])
+            except Exception:
+                pass
+        self._sync_vector(target)
+        self._record_correction(
+            "merge", source_id,
+            {"into": target_id, "confidence": new_conf},
+        )
+        self._save_persisted()
+        return target
+
+    async def resolve_conflict(
+        self,
+        rel_id: str,
+        preferred_source: str = "user",
+        resolution_note: Optional[str] = None,
+    ) -> Optional[CognitiveTriple]:
+        """P3 认知冲突解析：user/world 来源优先于助手自身（self）"""
+        triple = self._triples.get(rel_id)
+        if triple is None:
+            return None
+        if preferred_source in ("user", "world") or triple.dimension == Dimension.SELF:
+            triple.confidence = max(triple.confidence, 0.95)
+        if preferred_source == "user":
+            triple.is_confirmed_by_user = True
+        triple.updated_at = datetime.now()
+        self._record_correction(
+            "resolve_conflict", rel_id,
+            {"preferred_source": preferred_source, "resolution_note": resolution_note},
+        )
+        self._save_persisted()
+        return triple
+
+    async def confirm_triple(self, rel_id: str) -> Optional[CognitiveTriple]:
+        """标记为已确认（置信度升至 1.0）"""
+        triple = self._triples.get(rel_id)
+        if triple is None:
+            return None
+        triple.confidence = 1.0
+        triple.is_confirmed_by_user = True
+        triple.updated_at = datetime.now()
+        self._record_correction("confirm", rel_id)
+        self._save_persisted()
+        return triple
+
+    async def search_triples(
+        self,
+        user_id: str,
+        query: str,
+        is_active: bool = True,
+        dimension: Optional[Dimension] = None,
+    ) -> List[CognitiveTriple]:
+        """关键词检索三元组（subject/predicate/object 子串匹配，OR 关系）"""
+        keywords = [
+            k.strip().lower() for k in str(query or "").split() if k.strip()
+        ]
+        results = []
+        for triple in self._triples.values():
+            if triple.user_id != user_id or triple.is_active != is_active:
+                continue
+            if triple.is_expired():
+                continue
+            if dimension is not None and triple.dimension != dimension:
+                continue
+            if keywords:
+                text = (
+                    f"{triple.subject} {triple.predicate} {triple.object}"
+                ).lower()
+                if not any(k in text for k in keywords):
+                    continue
+            results.append(triple)
+        results.sort(
+            key=lambda t: (t.usage_count, t.confidence), reverse=True
+        )
+        return results
+
+    async def update_note_content(
+        self, note_id: str, content: str
+    ) -> Optional[Note]:
+        """更新笔记内容，返回更新后的 Note"""
+        note = self._notes.get(note_id)
+        if note is None:
+            return None
+        note.content = content
+        note.touch()
+        self._save_persisted()
+        return note
+
+    async def create_or_update_note(
+        self,
+        user_id: str,
+        note_type: str,
+        content: str,
+        title: str = "",
+        note_id: Optional[str] = None,
+        overwrite: bool = False,
+    ) -> str:
+        """创建或更新笔记（note_id 存在且非 overwrite 时复用）"""
+        note_id = note_id or f"note_{uuid.uuid4().hex[:8]}"
+        existing = self._notes.get(note_id)
+        if existing is not None and not overwrite:
+            return note_id
+        try:
+            nt = (
+                note_type if isinstance(note_type, NoteType)
+                else NoteType(str(note_type))
+            )
+        except ValueError:
+            nt = NoteType.LONG_TEXT
+        note = self._notes.get(note_id)
+        if note is None:
+            self._notes[note_id] = Note(
+                note_id=note_id, user_id=user_id,
+                note_type=nt, title=title, content=content,
+            )
+        else:
+            note.note_type = nt
+            if title:
+                note.title = title
+            note.content = content
+            note.touch()
+        self._save_persisted()
+        return note_id
+
+    async def search_notes(
+        self,
+        user_id: str,
+        query: str = "",
+        top_k: int = 5,
+        note_type: Optional[str] = None,
+        include_archived: bool = True,
+        time_range: Optional[str] = None,
+    ) -> List[Note]:
+        """搜索笔记（标题/内容/标签关键词 + 类型/时间范围过滤）"""
+        cutoff = _parse_time_range_str(time_range)
+        keywords = [
+            k.strip().lower() for k in str(query or "").split() if k.strip()
+        ]
+        try:
+            nt_filter = NoteType(str(note_type)) if note_type else None
+        except ValueError:
+            nt_filter = None
+        results = []
+        for note in self._notes.values():
+            if note.user_id != user_id:
+                continue
+            if not include_archived and note.is_archived():
+                continue
+            if nt_filter is not None and note.note_type != nt_filter:
+                continue
+            if cutoff is not None and note.created_at < cutoff:
+                continue
+            if keywords:
+                hay = (
+                    f"{note.title} {note.content} {note.summary or ''} "
+                    f"{' '.join(note.tags)}"
+                ).lower()
+                if not any(k in hay for k in keywords):
+                    continue
+            results.append(note)
+        results.sort(key=lambda n: n.created_at, reverse=True)
+        return results[:top_k]
+
+    async def get_correction_stats(self) -> Dict[str, Any]:
+        """错题本统计：操作次数与最近记录"""
+        by_operation: Dict[str, int] = {}
+        for entry in self._correction_log:
+            op = entry.get("operation", "unknown")
+            by_operation[op] = by_operation.get(op, 0) + 1
+        return {
+            "total": len(self._correction_log),
+            "by_operation": by_operation,
+            "recent": self._correction_log[-10:],
+        }

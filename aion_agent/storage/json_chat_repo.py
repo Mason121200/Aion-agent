@@ -86,6 +86,16 @@ class JsonChatRepo(IChatRepo):
         self._save()
         return session_id
 
+    def ensure_session(self, session_id: str, user_id: str) -> None:
+        """确保会话已登记（user_id 归属正确），便于会话列表管理"""
+        if session_id not in self._sessions:
+            self._sessions[session_id] = {
+                "user_id": user_id,
+                "created_at": _to_iso(datetime.now()),
+                "messages": [],
+            }
+            self._save()
+
     async def save_message(self, message: Message) -> str:
         sid = message.session_id
         if sid not in self._sessions:

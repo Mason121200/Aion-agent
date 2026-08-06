@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>Aion Agent</title>
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="brand">
+      <img src="/static/icon-192.png" alt="Aion" class="logo">
+      <div>
+        <h1>Aion Agent</h1>
+        <span id="model-info" class="sub">未连接</span>
+      </div>
+    </div>
+    <div class="actions">
+      <span id="status-dot" class="dot off" title="服务状态"></span>
+      <select id="session-select" title="切换会话"></select>
+      <button id="btn-new" class="icon-btn" title="新会话">✚</button>
+      <button id="btn-del" class="icon-btn" title="删除当前会话">🗑</button>
+      <button id="btn-memory" class="icon-btn" title="记忆">🧠</button>
+    </div>
+  </header>
+
+  <div id="config-banner" class="banner hidden"></div>
+
+  <main id="chat"></main>
+
+  <footer id="composer">
+    <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+    <button id="btn-send" disabled>发送</button>
+  </footer>
+</div>
+
+<!-- 记忆抽屉 -->
+<div id="memory-panel" class="panel hidden">
+  <div class="panel-head">
+    <h2>🧠 认知记忆</h2>
+    <button id="btn-close-memory" class="icon-btn">✕</button>
+  </div>
+  <div id="memory-body" class="panel-body"></div>
+</div>
+<div id="memory-mask" class="mask hidden"></div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
