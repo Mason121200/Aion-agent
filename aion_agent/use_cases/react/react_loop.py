@@ -150,6 +150,7 @@ class ReActLoop:
         cognition_totals: Dict[str, int] = {
             "triples": 0, "states": 0, "notes": 0, "skipped": 0, "total": 0,
         }
+        cognition_records: List[str] = []
         loop_exhausted = False
 
         # ---- 主循环 ----
@@ -197,6 +198,7 @@ class ReActLoop:
                                 summary = await self._handle_cognition_block(cog)
                                 if summary:
                                     self._merge_totals(cognition_totals, summary)
+                                    cognition_records.extend(summary.get("records", []))
                                     yield {"type": "cognition", **summary}
 
                     if chunk.content:
@@ -213,6 +215,7 @@ class ReActLoop:
                             summary = await self._handle_cognition_block(cog)
                             if summary:
                                 self._merge_totals(cognition_totals, summary)
+                                cognition_records.extend(summary.get("records", []))
                                 yield {"type": "cognition", **summary}
 
                     if chunk.tool_calls:
@@ -247,6 +250,7 @@ class ReActLoop:
                     summary = await self._handle_cognition_block(final_cog)
                     if summary:
                         self._merge_totals(cognition_totals, summary)
+                        cognition_records.extend(summary.get("records", []))
                         yield {"type": "cognition", **summary}
 
             # ---- 无工具调用 → 完成 ----
@@ -386,6 +390,21 @@ class ReActLoop:
             return None
         try:
             result = await self._pipeline.process_block(block, self._user_id)
+            records = []
+            for td in result.triples:
+                if isinstance(td, dict):
+                    text = (
+                        f"{td.get('subject', '')}{td.get('predicate', '')}"
+                        f"{td.get('object', '')}"
+                    ).strip()
+                    if text:
+                        records.append(text)
+            for sd in result.states:
+                if isinstance(sd, dict) and sd.get("state_name"):
+                    records.append(f"[状态] {sd.get('state_name')}")
+            for nd in result.notes:
+                if isinstance(nd, dict) and nd.get("title"):
+                    records.append(f"[笔记] {nd.get('title')}")
             return {
                 "triples": len(result.triples),
                 "states": len(result.states),
@@ -394,6 +413,7 @@ class ReActLoop:
                 "total": (
                     len(result.triples) + len(result.states) + len(result.notes)
                 ),
+                "records": records,
             }
         except Exception as e:
             logger.warning(f"[ReAct] 认知处理失败: {e}")

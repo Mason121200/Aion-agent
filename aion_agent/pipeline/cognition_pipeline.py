@@ -24,6 +24,7 @@ from aion_agent.pipeline.dimension_split_filter import (
 )
 from aion_agent.pipeline.json_parse_filter import JsonParseFilter
 from aion_agent.pipeline.markdown_parse_filter import MarkdownParseFilter
+from aion_agent.pipeline.semantic_dedup_filter import SemanticDedupFilter
 from aion_agent.pipeline.storage_filter import StorageFilter
 
 logger = logging.getLogger(__name__)
@@ -48,14 +49,20 @@ class CognitionPipeline:
         result = await pipeline.process_block(raw_block, user_id)
     """
 
-    def __init__(self, cognitive_repo: Optional[ICognitiveRepo] = None):
-        """初始化管道，注入存储仓库
+    def __init__(
+        self,
+        cognitive_repo: Optional[ICognitiveRepo] = None,
+        embedder=None,
+    ):
+        """初始化管道，注入存储仓库与可选嵌入器
 
         Args:
             cognitive_repo: 认知存储（triples/states/notes 共用）
+            embedder: （可选）语义嵌入器，用于语义去重
         """
         self._markdown_filter = MarkdownParseFilter()
         self._json_filter = JsonParseFilter()
+        self._dedup_filter = SemanticDedupFilter(embedder=embedder)
         self._dimension_filter = DimensionSplitFilter()
         self._storage_filter = StorageFilter(cognitive_repo=cognitive_repo)
 
@@ -82,6 +89,16 @@ class CognitionPipeline:
     def parse_json(self, raw_json: str) -> List[Dict[str, Any]]:
         """解析 JSON 字符串为认知条目列表"""
         return self._json_filter.process(raw_json)
+
+    # ==================== 过滤器2.5: SemanticDedup ====================
+
+    def deduplicate(
+        self,
+        items: List[Dict[str, Any]],
+        existing_items: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        """去重认知条目（精确 + 语义）"""
+        return self._dedup_filter.process(items, existing_items)
 
     # ==================== 过滤器3: DimensionSplit ====================
 
@@ -143,6 +160,7 @@ class CognitionPipeline:
         all_items: List[Dict[str, Any]] = []
         for block in all_cognition_blocks:
             all_items.extend(self.parse_json(block))
+        all_items = self.deduplicate(all_items)
 
         if not all_items:
             return visible_chunks, DispatchResult()
@@ -168,6 +186,7 @@ class CognitionPipeline:
         items = self.parse_json(raw_block)
         if not items:
             return DispatchResult()
+        items = self.deduplicate(items)
 
         result = self.split_dimension(items, user_id)
         result.store_success = await self.store(
@@ -184,6 +203,7 @@ class CognitionPipeline:
 
         适用于已解析好的认知条目直接走 分流 → 存储。
         """
+        items = self.deduplicate(items)
         result = self.split_dimension(items, user_id)
         result.store_success = await self.store(
             result.triples, result.states, result.notes

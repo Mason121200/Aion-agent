@@ -8,7 +8,7 @@ search_triples / update_note_content / create_or_update_note 等高级方法，
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from aion_agent.core.entities.agent_state import AgentState
 from aion_agent.core.entities.cognitive_triple import CognitiveTriple, Dimension
@@ -71,6 +71,39 @@ class ICognitiveRepo(ABC):
         ...
 
     @abstractmethod
+    async def merge_triples(
+        self, source_id: str, target_id: str
+    ) -> Optional[CognitiveTriple]:
+        """合并两个三元组：source 内容合并到 target，source 软删除"""
+        ...
+
+    @abstractmethod
+    async def resolve_conflict(
+        self,
+        rel_id: str,
+        preferred_source: str = "user",
+        resolution_note: Optional[str] = None,
+    ) -> Optional[CognitiveTriple]:
+        """P3 认知冲突解析：user/world 置信度优先于 self"""
+        ...
+
+    @abstractmethod
+    async def confirm_triple(self, rel_id: str) -> Optional[CognitiveTriple]:
+        """标记为已确认（置信度升至 1.0）"""
+        ...
+
+    @abstractmethod
+    async def search_triples(
+        self,
+        user_id: str,
+        query: str,
+        is_active: bool = True,
+        dimension: Optional[Dimension] = None,
+    ) -> List[CognitiveTriple]:
+        """关键词检索三元组（subject/predicate/object 子串匹配，OR 关系）"""
+        ...
+
+    @abstractmethod
     async def list_triples_by_dimension(
         self,
         user_id: str,
@@ -123,4 +156,42 @@ class ICognitiveRepo(ABC):
         self, user_id: str, top_k: int = 5
     ) -> List[Note]:
         """获取待注入的笔记"""
+        ...
+
+    @abstractmethod
+    async def update_note_content(
+        self, note_id: str, content: str
+    ) -> Optional[Note]:
+        """更新笔记内容，返回更新后的 Note"""
+        ...
+
+    @abstractmethod
+    async def create_or_update_note(
+        self,
+        user_id: str,
+        note_type: str,
+        content: str,
+        title: str = "",
+        note_id: Optional[str] = None,
+        overwrite: bool = False,
+    ) -> str:
+        """创建或更新笔记"""
+        ...
+
+    @abstractmethod
+    async def search_notes(
+        self,
+        user_id: str,
+        query: str = "",
+        top_k: int = 5,
+        note_type: Optional[str] = None,
+        include_archived: bool = True,
+        time_range: Optional[str] = None,
+    ) -> List[Note]:
+        """搜索笔记（标题/内容/标签关键词 + 类型/时间范围过滤）"""
+        ...
+
+    @abstractmethod
+    async def get_correction_stats(self) -> Dict[str, Any]:
+        """错题本统计"""
         ...

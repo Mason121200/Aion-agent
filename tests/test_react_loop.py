@@ -272,3 +272,84 @@ class TestReActChatSession:
             "小杨偏好语言中文" in m.get("content", "")
             for m in second_system_messages
         )
+
+    def test_session_saves_full_streamed_reply_with_tool(self):
+        """工具调用轮的正文（问候语）也要进历史，不能只剩最后一句确认"""
+        llm = FakeAsyncLLM([
+            {
+                "content": "你好，小王！很高兴认识你！我已经记住你的名字了。",
+                "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": {
+                        "name": "create_cognition",
+                        "arguments": {
+                            "subject": "用户", "predicate": "名字是",
+                            "object": "小王", "dimension": "user",
+                            "confidence": 0.95,
+                        },
+                    },
+                }],
+            },
+            {"content": "已经把你的名字记到长期记忆里了。"},
+        ])
+        repo = InMemoryCognitiveRepo()
+        chat_repo = JsonChatRepo()
+        session = ReActChatSession(
+            llm, cognitive_repo=repo, chat_repo=chat_repo, user_id="u1",
+        )
+        run(session.create_session("u1"))
+        run(session.chat("我是小王，你好"))
+
+        history = run(session.get_history())
+        assistant_msgs = [m.content for m in history if m.role == "assistant"]
+        assert assistant_msgs and "小王！很高兴认识你" in assistant_msgs[-1]
+        assert "已经把你的名字记到长期记忆里了" in assistant_msgs[-1]
+
+        # create_cognition 工具确实写入了长期记忆
+        triples = asyncio.run(repo.search_triples("u1", "小王"))
+        assert any(t.subject == "用户" and "小王" in t.object for t in triples)
+
+    def test_cognition_event_carries_records(self):
+        """cognition 事件携带具体记录内容，供 CLI 展示简洁提示"""
+        content = (
+            "记住了。\n"
+            "<!--COGNITION_START-->"
+            '[{"type":"triple","subject":"小杨","predicate":"偏好语言","object":"中文","dimension":"user","confidence":0.95}]'
+            "<!--COGNITION_END-->"
+        )
+        llm = FakeAsyncLLM([{"content": content}])
+        events, _ = _run_events(llm)
+        cog = [e for e in events if e["type"] == "cognition"][0]
+        assert cog["records"] == ["小杨偏好语言中文"]
+        assert cog["total"] == 1
+
+    def test_rule_based_extract_fallback(self):
+        """LLM 未输出认知块时，规则兜底仍能提取并沉淀自我介绍"""
+        llm = FakeAsyncLLM([{"content": "你好！很高兴认识你。"}])
+        repo = InMemoryCognitiveRepo()
+        session = ReActChatSession(llm, cognitive_repo=repo, user_id="u1")
+        run(session.create_session("u1"))
+        result = run(session.chat("我叫小李，我喜欢看电影"))
+
+        cog_events = [e for e in result["events"] if e["type"] == "cognition"]
+        assert cog_events, "缺少规则兜底 cognition 事件"
+        records = [r for e in cog_events for r in e.get("records", [])]
+        assert any("用户名字是小李" in r for r in records)
+        assert any("用户喜欢看电影" in r for r in records)
+
+        triples = run(repo.search_triples("u1", "小李"))
+        assert any(t.subject == "用户" and t.object == "小李" for t in triples)
+        prefs = run(repo.search_triples("u1", "看电影"))
+        assert any(t.subject == "用户" and "看电影" in t.object for t in prefs)
+
+    def test_rule_based_extract_skips_questions(self):
+        """反问句（我叫什么）不应被当作名字沉淀"""
+        llm = FakeAsyncLLM([{"content": "你叫小李。"}])
+        repo = InMemoryCognitiveRepo()
+        session = ReActChatSession(llm, cognitive_repo=repo, user_id="u1")
+        run(session.create_session("u1"))
+        result = run(session.chat("我叫什么？"))
+        cog_events = [e for e in result["events"] if e["type"] == "cognition"]
+        assert not cog_events
+        triples = run(repo.retrieve("u1", query="*")) or []
+        assert not any(t.subject == "用户" and "什么" in t.object for t in triples)
