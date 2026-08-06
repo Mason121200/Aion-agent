@@ -69,6 +69,13 @@ class CognitionInjector:
         world_budget = int(total_budget * 0.8)
         state_budget = int(total_budget * 0.1)
 
+        if not any(grouped.values()):
+            return (
+                "\n\n## 已知认知记忆\n"
+                "当前暂无已存储的长期记忆。请勿编造用户身份或历史信息，"
+                "仅根据当前对话内容自然回应。\n"
+            )
+
         result_parts = ["\n\n## 🧠 已知认知记忆\n"]
         result_parts.append(
             "以下是此前对话中提取的认知信息，请在回答时参考这些上下文：\n"
