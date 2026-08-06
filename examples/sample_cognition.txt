@@ -1,0 +1,21 @@
+这是第 1 段可见文本，不会被当作认知。
+
+<!--COGNITION_START-->
+[
+  {"type": "triple", "subject": "小杨", "predicate": "正在学习", "object": "大语言模型第8章复杂推理", "dimension": "state", "confidence": 0.8, "expires_in": 7},
+  {"type": "triple", "subject": "小杨", "predicate": "偏好语言", "object": "中文", "dimension": "user", "confidence": 0.95},
+  {"type": "triple", "subject": "ReAct", "predicate": "是", "object": "一种交替推理与行动的提示范式", "dimension": "world", "confidence": 0.9},
+  {"type": "triple", "subject": "工作区", "predicate": "有", "object": "5 个未提交的变更", "dimension": "env", "confidence": 0.7},
+  {"type": "state", "state_name": "阅读第8章", "state_type": "task", "description": "正在对照代码学习", "priority": 3, "expires_in": 7},
+  {"type": "note", "title": "第8章收获", "content": "ReAct 让推理与行动交错，Reflexion 增加反思环节，记忆层负责把行动结果沉淀为认知。这是复杂推理的三个核心部件。", "tags": ["llm", "chapter8"]}
+]
+<!--COGNITION_END-->
+
+这是第 2 段可见文本，第 2 个认知块演示「重复出现合并」：
+
+<!--COGNITION_START-->
+[
+  {"type": "triple", "subject": "小杨", "predicate": "偏好语言", "object": "中文", "dimension": "user", "confidence": 0.98},
+  {"type": "triple", "subject": "Reflexion", "predicate": "是", "object": "一种带反思纠错的推理范式", "dimension": "world", "confidence": 0.85}
+]
+<!--COGNITION_END-->

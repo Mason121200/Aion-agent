@@ -1,0 +1,39 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+
+# ===== 测试 / 覆盖率 / 静态检查缓存 =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ===== 运行时数据（用户对话记忆 / 向量索引 / 演示数据）=====
+aion_agent/data/
+
+# ===== 日志 =====
+*.log
+logs/
+
+# ===== 密钥与本地配置（.env.example 保留跟踪）=====
+.env
+.env.local
+
+# ===== 编辑器 / 系统文件 =====
+.idea/
+.vscode/
+*.swp
+*.tmp
+.DS_Store
+Thumbs.db

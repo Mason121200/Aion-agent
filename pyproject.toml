@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aion-agent"
+version = "0.1.0"
+description = "轻量级 LLM Agent：认知记忆闭环（提取/分流/存储/RAG 注入）+ ReAct 循环（推理/工具调用/反思）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Aion Agent contributors" }]
+keywords = ["llm", "cognition", "memory", "rag", "agent", "react"]
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+aion = "aion_agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Mason121200/Aion-agent"
+Repository = "https://github.com/Mason121200/Aion-agent"
+Issues = "https://github.com/Mason121200/Aion-agent/issues"
+
+[tool.setuptools.packages.find]
+include = ["aion_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
