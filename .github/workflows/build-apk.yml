@@ -23,6 +23,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Setup Python (Chaquopy 内嵌引擎构建)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Setup Gradle
         uses: gradle/gradle-build-action@v3
 
