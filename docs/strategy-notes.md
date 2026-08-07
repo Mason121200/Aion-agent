@@ -38,7 +38,10 @@
 - 出路：垂直场景（学习 / 陪伴 / 教育）小规模验证 → 开源社区 → SDK / MCP 基础设施。
 
 ## 七、待办（后续）
-- [ ] memory-format 规范 + 导出/导入 API
-- [ ] 梦境模式隐私开关与本地模型选项
+- [x] 记忆格式规范 + 导出/导入 API（已落地 `docs/sync-protocol.md` + `/api/sync/export|import|pull`）
+- [x] 跨设备同步（Bundle 协议：设备直连、按 id 去重、时间新者优先）
+- [x] Skill 体系与 manifest（三级固化 + 可分发格式）
+- [ ] 梦境模式隐私开关与本地模型选项（暂缓，用户决定先完善基础）
+- [ ] 同步 v2：增量 diff / 认证加密 / 数据签名
 - [ ] 记忆层 MCP server
 - [x] 学习场景（辅助学习：资料 / 计划 / 进度 / 提醒，见 `aion_agent/study`）

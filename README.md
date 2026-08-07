@@ -2,7 +2,8 @@
 
 > Aion Agent —— 完整 Agent 的精简版（MVP 是相对 zero_code 而言）。
 > zero_code 是原型验证项目；Aion Agent 是正式开源项目。
-> 当前已落地「ReAct 循环 + 工具执行 + 对话记忆」闭环。
+> 当前已落地「ReAct 循环 + 工具执行 + 对话记忆 + 通用工具安全层 + Skill 技能体系 + 长期任务规划 + 跨设备同步」闭环。
+> 目标：成为可依赖的通用 Agent 底座，以数据传输服务 + Skill 构建生态。
 
 认知流水线（无 LLM 时可离线演示；接入 LLM 后对话自动沉淀记忆）：
 
@@ -61,11 +62,69 @@ python -m aion_agent demo
 # 从文本文件提取认知块并入库
 python -m aion_agent extract <file.txt>
 
+# 启动本地服务（Web UI / PWA，手机同局域网访问）
+python -m aion_agent serve
+
 # 运行测试
 python -m pytest tests -q
 ```
 
 核心依赖仅 `numpy`；LLM 客户端用标准库实现，实体层用 `dataclass`。
+
+## 通用工具与安全层
+
+内置 7 个通用工具，覆盖 ReAct「环境反馈」场景：
+
+| 工具 | 说明 |
+|------|------|
+| `get_current_time` / `calculator` | 时间 / 数学计算（AST 白名单求值，杜绝 eval） |
+| `read_file` / `file_write` / `file_list` | 本地文件读写与目录列表（限时限量） |
+| `web_fetch` | 网页文本抓取（仅 http/https，限时限量） |
+| `shell` | 只读命令白名单（默认需用户确认） |
+
+安全边界（`aion_agent/security/guard.py`）：
+- `PathGuard`：敏感路径黑名单（`.env` / `.pem` / `.git` / 密钥等）+ 系统目录拦截 + 可配置允许写根；
+- `CommandWhitelist`：只允许只读命令（`pwd/ls/dir/echo/whoami/hostname/date`），
+  危险模式（管道 / 重定向 / 递归删除 / 关机格式化）一律拒绝；
+- 权限策略：`auto`（自动执行）/ `confirm`（需用户确认）/ `blocked`（禁用），
+  可在 Web UI 调整并持久化到 `tool_policy.json`。
+
+## Skill 技能体系
+
+能力以 Skill 打包接入，**任何新能力 = 一个技能包**：
+
+- 三级固化：`system`（框架契约，不可禁用）/ `builtin`（随框架固化，不可覆盖）/
+  `skill`（可启停扩展）；
+- 默认技能：`builtin`（通用工具）/ `cognition`（认知层工具）/
+  `planner`（任务规划）/ `study`（学习场景）；
+- 每个 Skill 可导出 manifest（`name/version/description/level/tools`），
+  工具定义遵循 OpenAI function calling 格式，作为生态互操作的统一标准
+  （见 `docs/sync-protocol.md` 2.8 节）。
+
+## 长期任务与状态联动
+
+`planner/` 提供完整任务闭环：`task_create → task_update / task_checkin → task_archive`，
+支持里程碑、进度追溯、动态调整。
+
+任务与认知层自动联动（同一数据，两处视图）：
+- 创建任务 → 写入「正在执行长期任务」记忆 + 任务状态（state）；
+- 停止 / 归档 / 完成 → 释放状态、记忆自动失效，不再被注入；
+- 修改标题 / 截止 / 进度 → 记忆与状态同步更新；
+- 检视打卡 → 追加决策日志、刷新活跃时间。
+
+完整规划方案落盘：`plan_text`（完整方案）+ `acceptance_criteria`（验收标准）+
+里程碑步骤（`steps / output / acceptance`），作为 agent 后续追踪进度的数据基础。
+
+## 跨设备数据同步
+
+设备间点对点直连（P2P），无中心服务器：
+
+- 导出：`GET /api/sync/export` → 全量 Bundle（认知 / 会话 / 任务 / 学习 / 配置 6 类数据）；
+- 导入 / 拉取：`POST /api/sync/import`（JSON 数据包）或 `POST /api/sync/pull`（对端地址）；
+- 合并规则：按记录 id 去重、时间新者优先、消息按 id 合并；执行日志与设备标识不同步；
+- Web UI 右上角「🔗 同步」：导出复制 / 局域网拉取 / JSON 导入三种方式。
+
+协议规范见 `docs/sync-protocol.md`（数据模型、传输端点、合并规则、对接端实现清单）。
 
 ## ReAct 循环层（Think → Act → Observe → Reflect）
 
@@ -216,9 +275,10 @@ class MyEmbedder:
 | 事件总线 + SSE | 直接返回事件字典 | 简化调用面 |
 | ReActLoop（Hub + 自评 + 效率日志） | ✅ ReActLoop（核心闭环） | 裁掉 Hub/自评/指标，保留 Think→Act→Observe→Reflect |
 | 上下文窗口管理 | ✅ context_window.py（历史窗口 + Token 预算） | 每轮请求严格扩展上一轮，可命中前缀缓存 |
-| 工具执行（注册表/执行器/内置工具） | ✅ tools/（3 个内置工具） | 超时熔断 + 错误分类 |
+| 工具执行（注册表/执行器/内置工具） | ✅ tools/（7 个内置工具 + 安全层） | 超时熔断 + 权限策略（auto/confirm/blocked） |
 | Reflexion（LLM 反思） | ✅ reflect_with_llm | 失败时调用，解析失败回退规则式 |
-| 任务编排 / 双文档协作 / 用户确认 | 暂未移植（路线图） | 下一个移植目标 |
+| 任务编排（长期规划） | ✅ planner/（任务/里程碑/进度/动态调整） | 任务-状态-记忆联动 + 完整方案落盘 |
+| 双文档协作 / 用户确认 | 暂未移植 | 后续目标 |
 | 冲突解决 / 合并 / 用户确认 | 暂未移植 | 高级认知操作 |
 
 ## 应用化（桌面 + 手机，可直接安装使用）
@@ -262,12 +322,17 @@ class MyEmbedder:
 aion_agent/
 ├── core/                # 实体与端口（Message / ToolCall / 认知实体 / 端口接口）
 ├── pipeline/            # 管道-过滤器：提取 → 解析 → 分流 → 存储
+├── planner/             # 长期任务规划（JsonPlanRepo：任务/里程碑/决策日志）
+├── security/            # 安全守卫（PathGuard / CommandWhitelist）
+├── skills/              # Skill 技能体系（注册 / 启停 / 目录 / manifest）
 ├── storage/             # InMemoryCognitiveRepo / JsonChatRepo / NumpyVectorStore
+├── study/               # 学习场景（计划 / 资料 / 记录 / 提醒）
+├── sync/                # 跨设备同步（Bundle 导出 / 合并 / 拉取）
 ├── llm/                 # OpenAI 兼容客户端（stdlib，流式/非流式/工具调用）
-├── server/              # FastAPI 服务 + Web UI（PWA）
-├── tools/               # 工具注册表 / 执行器 / 内置工具
+├── server/              # FastAPI 服务 + Web UI（PWA）+ 同步 API
+├── tools/               # 工具注册表 / 执行器 / 内置工具（含安全守卫）
 └── use_cases/
-    ├── react/           # ReAct 循环：react_loop / observe / reflect / context_window
+    ├── react/           # ReAct 循环：react_loop / observe / reflect / verify / context_window
     ├── react_chat_session.py  # ReAct 对话会话（记忆注入 + 窗口管理）
     └── cognition_*.py   # 认知用例（旧 chat 兼容）
 android/                 # Android WebView 壳（GitHub Actions 云构建 APK）
@@ -283,9 +348,13 @@ docs/learning_map.md     # 教材第8章「复杂推理」学习对照
 3. ✅ ReAct 循环层（观察 → 思考 → 行动 → 认知归档）
 4. ✅ 工具执行 + 环境反馈（内置时间/计算/读文件，超时熔断）
 5. ✅ Reflexion 反思闭环（失败时 LLM 反思，回退规则式）
-6. ⏳ 任务编排 / 执行单元验证（参考 zero_code TaskOrchestrator）
-7. ⏳ 认知冲突解决 / 合并 / 用户确认
-8. ✅ 应用化：本地服务（Web UI/PWA） + 桌面壳 + Android APK 云构建
+6. ✅ 任务编排 / 长期规划（planner：任务/里程碑/进度/动态调整 + 认知联动）
+7. ✅ Skill 技能体系（三级固化 + manifest 可分发）
+8. ✅ 跨设备同步（Bundle 协议：导出/导入/拉取，见 docs/sync-protocol.md）
+9. ✅ 应用化：本地服务（Web UI/PWA） + 桌面壳 + Android APK 云构建
+10. ⏳ 认知冲突解决 / 合并 / 用户确认（高级认知操作）
+11. ⏳ 同步 v2：增量 diff / 认证加密 / 数据签名
+12. ⏳ 记忆层 MCP server（让任何 agent 可读写记忆）
 
 ## License
 
