@@ -8,7 +8,7 @@
   --accent: #60a5fa;
   --danger: #f87171;
   --ok: #4ade80;
-  --radius: 14px;
+  --radius: 10px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
@@ -62,10 +62,10 @@ body {
   margin: auto; text-align: center; max-width: 420px; padding: 24px 18px;
   color: var(--muted);
 }
-.welcome .welcome-logo { font-size: 44px; margin-bottom: 10px; }
-.welcome h2 { color: var(--fg); font-size: 19px; margin-bottom: 8px; }
+.welcome .welcome-logo { font-size: 30px; margin-bottom: 12px; opacity: .85; }
+.welcome h2 { color: var(--fg); font-size: 18px; margin-bottom: 8px; }
 .welcome p { font-size: 13.5px; line-height: 1.7; }
-.welcome .welcome-tips { margin-top: 14px; font-size: 12px; opacity: 0.9; }
+.welcome .welcome-tips { margin-top: 14px; font-size: 12px; opacity: .75; }
 
 /* 输入区 */
 #composer {
@@ -89,7 +89,7 @@ body {
 .panel {
   position: fixed; top: 0; right: 0; bottom: 0; width: min(420px, 92vw);
   background: var(--bg2); z-index: 30; display: flex; flex-direction: column;
-  box-shadow: -8px 0 24px rgba(0,0,0,0.4); transition: transform .2s ease;
+  border-left: 1px solid var(--bg3); transition: transform .2s ease;
 }
 .panel.hidden { transform: translateX(105%); }
 .panel:not(.hidden) { transform: translateX(0); }
@@ -99,10 +99,10 @@ body {
 }
 .panel-body { flex: 1; overflow-y: auto; padding: 12px 16px; }
 .mem-group { margin-bottom: 16px; }
-.mem-group h3 { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+.mem-group h3 { font-size: 12px; color: var(--muted); margin-bottom: 6px; letter-spacing: .5px; }
 .mem-item {
-  background: var(--bg); border: 1px solid var(--bg3); border-radius: 10px;
-  padding: 8px 10px; margin-bottom: 6px; font-size: 13px; line-height: 1.5;
+  background: var(--bg); border: 1px solid var(--bg3); border-radius: 8px;
+  padding: 7px 10px; margin-bottom: 6px; font-size: 13px; line-height: 1.5;
 }
 .mem-item .meta { font-size: 11px; color: var(--muted); margin-top: 4px; }
 .mem-item .del {
@@ -111,6 +111,26 @@ body {
 }
 .mask { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 20; }
 .hidden { display: none !important; }
+
+/* 提醒横幅 */
+#notify-banner {
+  position: relative;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--bg3);
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 9px 14px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+#notify-banner .notify-body { flex: 1; min-width: 0; }
+#notify-banner .notify-title { font-weight: 600; color: var(--accent); }
+#notify-banner .notify-close {
+  background: none; border: none; color: var(--muted);
+  font-size: 15px; cursor: pointer; padding: 0 2px; line-height: 1;
+}
 
 /* Toast */
 #toast {
@@ -125,6 +145,18 @@ body {
 @media (min-width: 768px) {
   .msg { max-width: 72%; }
 }
+
+/* 小徽标（学习面板） */
+.badge {
+  display: inline-block; background: var(--bg3); color: var(--muted);
+  border-radius: 999px; padding: 1px 8px; font-size: 11px; margin-left: 4px;
+}
+.btn-mini {
+  float: right; background: none; border: 1px solid var(--bg3);
+  color: var(--accent); border-radius: 8px; padding: 2px 8px;
+  font-size: 12px; cursor: pointer;
+}
+.btn-mini:hover { border-color: var(--accent); }
 
 /* 会话选择 + 配置横幅 */
 #session-select {

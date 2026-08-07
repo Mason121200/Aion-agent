@@ -131,7 +131,7 @@ class ReActLoop:
             })
 
         # ---- 上下文窗口：按 token 预算裁剪历史（保护最新用户消息） ----
-        prompt_budget = max(self._max_tokens_budget // 3, 2000)
+        prompt_budget = max(self._max_tokens_budget // 2, 3000)
         messages, dropped = trim_messages_by_tokens(
             messages, budget=prompt_budget, protected_tail=1,
         )
@@ -223,7 +223,13 @@ class ReActLoop:
 
                     if chunk.is_final:
                         if chunk.usage and isinstance(chunk.usage, dict):
-                            step_tokens = int(chunk.usage.get("total_tokens", 0) or 0)
+                            # 预算按本轮新增输出 token 计，输入上下文不计入
+                            # （避免大上下文把预算快速耗尽，打断多步工具流程）
+                            step_tokens = int(
+                                chunk.usage.get("completion_tokens")
+                                or chunk.usage.get("total_tokens", 0)
+                                or 0
+                            )
                             self._total_tokens += step_tokens
                         break
             except Exception as e:

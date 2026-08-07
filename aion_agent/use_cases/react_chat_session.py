@@ -27,6 +27,7 @@ from aion_agent.tools import (
     ToolRegistry,
     register_builtin_tools,
     register_cognition_tools,
+    register_study_tools,
 )
 from aion_agent.use_cases.cognition_injector import CognitionInjector
 from aion_agent.use_cases.react.prompts import REACT_TOOL_HINT
@@ -91,8 +92,9 @@ class ReActChatSession:
         base_prompt: str = _DEFAULT_BASE_PROMPT,
         token_budget: int = 2000,
         max_steps: int = 8,
-        max_tokens_budget: int = 8000,
+        max_tokens_budget: int = 20000,
         max_context_messages: int = 20,
+        study_repo=None,
         tools_enabled: bool = True,
         llm_reflect_enabled: bool = True,
         tool_timeout_seconds: int = 30,
@@ -114,6 +116,7 @@ class ReActChatSession:
         self._max_steps = max_steps
         self._max_tokens_budget = max_tokens_budget
         self._max_context_messages = max_context_messages
+        self._study_repo = study_repo
         self._tools_enabled = tools_enabled
         self._llm_reflect_enabled = llm_reflect_enabled
         self._tool_timeout_seconds = tool_timeout_seconds
@@ -127,6 +130,13 @@ class ReActChatSession:
             register_cognition_tools(
                 self._tool_registry, self._repo, user_id=self._user_id
             )
+            if self._study_repo is not None:
+                register_study_tools(
+                    self._tool_registry,
+                    self._study_repo,
+                    cognitive_repo=self._repo,
+                    user_id=self._user_id,
+                )
             self._tool_executor = ToolExecutor(self._tool_registry)
 
     # ==================== 会话 ====================
@@ -169,6 +179,25 @@ class ReActChatSession:
         dynamic = await self._injector.build_dynamic_context(
             self._user_id, current_message=user_message,
         )
+        # 学习场景：把已到期/近期提醒注入动态上下文，agent 可主动提及
+        if self._study_repo is not None:
+            try:
+                due = self._study_repo.due_reminders()
+                upcoming = self._study_repo.upcoming_reminders(limit=3)
+                reminder_lines = []
+                if due:
+                    reminder_lines.append("【已到期提醒】" + "；".join(
+                        f"{r['title']}（{r['remind_at'][11:16]}）" for r in due
+                    ))
+                if upcoming:
+                    reminder_lines.append("【近期提醒】" + "；".join(
+                        f"{r['title']}（{r['remind_at'][5:16].replace('T', ' ')}）"
+                        for r in upcoming
+                    ))
+                if reminder_lines:
+                    dynamic = (dynamic + "\n\n" if dynamic else "") + "\n".join(reminder_lines)
+            except Exception:  # noqa: BLE001 提醒注入失败不影响主流程
+                pass
         system = self._injector.build_static_system_prompt(
             base_prompt=self._base_prompt
         )

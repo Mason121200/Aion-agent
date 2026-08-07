@@ -26,10 +26,12 @@
       <button id="btn-new" class="icon-btn" title="新会话">✚</button>
       <button id="btn-del" class="icon-btn" title="删除当前会话">🗑</button>
       <button id="btn-memory" class="icon-btn" title="记忆">🧠</button>
+      <button id="btn-study" class="icon-btn" title="学习">📚</button>
     </div>
   </header>
 
   <div id="config-banner" class="banner hidden"></div>
+  <div id="notify-banner" class="notify hidden"></div>
 
   <main id="chat"></main>
 
@@ -48,6 +50,16 @@
   <div id="memory-body" class="panel-body"></div>
 </div>
 <div id="memory-mask" class="mask hidden"></div>
+
+<!-- 学习抽屉 -->
+<div id="study-panel" class="panel hidden">
+  <div class="panel-head">
+    <h2>📚 学习</h2>
+    <button id="btn-close-study" class="icon-btn">✕</button>
+  </div>
+  <div id="study-body" class="panel-body"></div>
+</div>
+<div id="study-mask" class="mask hidden"></div>
 
 <!-- Toast -->
 <div id="toast"></div>

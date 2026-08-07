@@ -329,9 +329,12 @@ def cmd_chat(args) -> int:
         base_url=cfg["base_url"],
         model=cfg["model"],
     )
+    from aion_agent.study.study_repo import JsonStudyRepo
+    study_repo = JsonStudyRepo(persist_dir=_default_data_dir() / "chat")
     session = ReActChatSession(
         llm,
         cognitive_repo=repo,
+        study_repo=study_repo,
         user_id=args.user,
         tools_enabled=not args.no_tools,
         max_steps=args.max_steps,
@@ -343,7 +346,7 @@ def cmd_chat(args) -> int:
     print(f"模型: {llm.model}  |  接口: {llm.base_url}")
     if not args.no_tools:
         print(
-            "工具: get_current_time / calculator / read_file"
+            "工具: get_current_time / calculator / read_file / 学习工具（计划/进度/资料/提醒）"
             "（无需工具时模型直接回答并结束循环）"
         )
     print(f"步数上限: {session._max_steps}  |  Token 预算: {session._max_tokens_budget}")
@@ -370,7 +373,7 @@ def _run_interactive_menu() -> int:
         if choice == "1":
             code = cmd_chat(argparse.Namespace(
                 user="chat_user", no_tools=False,
-                max_steps=8, token_budget=8000,
+                max_steps=8, token_budget=20000,
             ))
             break
         if choice == "2":
@@ -461,7 +464,7 @@ def main(argv=None) -> int:
     )
     chat_p.add_argument("--max-steps", type=int, default=8, help="ReAct 最大步数")
     chat_p.add_argument(
-        "--token-budget", type=int, default=8000, help="全循环 token 预算"
+        "--token-budget", type=int, default=20000, help="全循环 token 预算"
     )
 
     demo_p = sub.add_parser("demo", help="离线全链路演示（无 LLM 也可跑）")
