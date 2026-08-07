@@ -9,8 +9,10 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from aion_agent.core.entities.agent_state import AgentState
 from aion_agent.core.entities.cognitive_triple import CognitiveTriple, Dimension
@@ -24,6 +26,7 @@ from aion_agent.llm.openai_compatible import (
 from aion_agent.pipeline.cognition_pipeline import CognitionPipeline
 from aion_agent.storage.in_memory_cognitive_repo import InMemoryCognitiveRepo
 from aion_agent.storage.json_chat_repo import JsonChatRepo
+from aion_agent.study.study_repo import JsonStudyRepo
 from aion_agent.use_cases.react_chat_session import ReActChatSession
 
 logger = logging.getLogger(__name__)
@@ -101,12 +104,20 @@ class AppRuntime:
             embedder=self._embedder, persist_dir=self.data_dir
         )
         self._chat_repo = JsonChatRepo(persist_dir=self.data_dir)
+        self._study_repo = JsonStudyRepo(persist_dir=self.data_dir)
         self._pipeline = CognitionPipeline(
             cognitive_repo=self._repo, embedder=self._embedder
         )
         self._sessions: Dict[str, ReActChatSession] = {}
         self._llm = None
         self._llm_error: Optional[str] = None
+        # 提醒通知：定时器把到期提醒放入队列，Web UI 轮询拉取展示
+        self._pending_notifications: List[dict] = []
+        self._notification_lock = threading.Lock()
+        self._reminder_watcher = threading.Thread(
+            target=self._watch_reminders, daemon=True, name="aion-reminder-watch"
+        )
+        self._reminder_watcher.start()
 
     # ---------- LLM ----------
 
@@ -178,6 +189,7 @@ class AppRuntime:
             cognitive_repo=self._repo,
             chat_repo=self._chat_repo,
             pipeline=self._pipeline,
+            study_repo=self._study_repo,
             user_id=user_id,
             session_id=session_id,
         )
@@ -195,3 +207,31 @@ class AppRuntime:
     @property
     def repo_chat(self) -> JsonChatRepo:
         return self._chat_repo
+
+    @property
+    def repo_study(self) -> JsonStudyRepo:
+        return self._study_repo
+
+    # ---------- 提醒通知 ----------
+
+    def _watch_reminders(self, interval: float = 15.0) -> None:
+        """后台定时检查到期提醒，放入待通知队列（幂等，重启不重复）"""
+        while True:
+            try:
+                fired = self._study_repo.fire_due_reminders()
+                if fired:
+                    with self._notification_lock:
+                        self._pending_notifications.extend(fired)
+                        # 队列上限，防止长时间未打开 UI 时堆积
+                        self._pending_notifications = self._pending_notifications[-50:]
+            except Exception:  # noqa: BLE001
+                logger.exception("提醒检查失败")
+            time.sleep(interval)
+
+    def pending_notifications(self) -> List[dict]:
+        with self._notification_lock:
+            return list(self._pending_notifications)
+
+    def ack_notifications(self) -> None:
+        with self._notification_lock:
+            self._pending_notifications.clear()

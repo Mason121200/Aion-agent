@@ -37,3 +37,5 @@ logs/
 *.tmp
 .DS_Store
 Thumbs.db
+# ===== local verification data =====
+.local_data/

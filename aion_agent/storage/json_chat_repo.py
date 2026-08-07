@@ -158,6 +158,7 @@ class JsonChatRepo(IChatRepo):
                 "message_count": len(messages),
                 "preview": preview,
             })
+        out.sort(key=lambda s: s.get("created_at") or "", reverse=True)
         return out
 
     async def delete_session(self, session_id: str) -> bool:

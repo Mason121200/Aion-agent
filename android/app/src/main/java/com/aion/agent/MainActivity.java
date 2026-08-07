@@ -2,8 +2,13 @@ package com.aion.agent;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
@@ -50,6 +55,8 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        createNotificationChannel();
+        requestNotificationPermission();
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -106,6 +113,16 @@ public class MainActivity extends Activity {
                     @Override
                     public void run() {
                         showSettingsDialog();
+                    }
+                });
+            }
+
+            @JavascriptInterface
+            public void notify(final String title, final String body) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        showSystemNotification(title, body);
                     }
                 });
             }
@@ -181,6 +198,50 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             lastHealthError = String.valueOf(e.getMessage());
             return false;
+        }
+    }
+
+    /** 通知渠道 + 运行时权限（Android 13+ 需要 POST_NOTIFICATIONS） */
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel ch = new NotificationChannel(
+                    "aion_reminder", "Aion 提醒", NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription("学习计划与闹钟提醒");
+            getSystemService(NotificationManager.class).createNotificationChannel(ch);
+        }
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1);
+        }
+    }
+
+    /** 系统通知（WebView 前端通过 AionAndroid.notify 调用） */
+    private void showSystemNotification(String title, String body) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            String channelId = "aion_reminder";
+            if (Build.VERSION.SDK_INT >= 26) {
+                NotificationChannel ch = new NotificationChannel(
+                        channelId, "Aion 提醒", NotificationManager.IMPORTANCE_HIGH);
+                ch.setDescription("学习计划与闹钟提醒");
+                nm.createNotificationChannel(ch);
+            }
+            Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                    ? new Notification.Builder(this, channelId)
+                    : new Notification.Builder(this);
+            builder.setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle(title)
+                    .setContentText(body)
+                    .setAutoCancel(true)
+                    .setDefaults(Notification.DEFAULT_ALL);
+            nm.notify((int) System.currentTimeMillis(), builder.build());
+        } catch (Exception e) {
+            Log.e("AionAgent", "showSystemNotification failed", e);
         }
     }
 

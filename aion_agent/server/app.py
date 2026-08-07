@@ -57,6 +57,13 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
     rt = runtime or AppRuntime()
     app = FastAPI(title="Aion Agent", version="0.1.0")
 
+    # 本地应用：禁用缓存，保证 UI 更新立即生效（Android WebView / 浏览器通用）
+    @app.middleware("http")
+    async def no_store_cache(request, call_next):
+        response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     # ---------- 健康 / 状态 ----------
 
     @app.get("/api/health")
@@ -163,6 +170,45 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
         if not ok:
             raise HTTPException(status_code=404, detail=f"未找到 {rel_id}")
         return {"deleted": rel_id}
+
+    # ---------- 学习场景 ----------
+
+    @app.get("/api/study/overview")
+    async def study_overview():
+        return rt.repo_study.overview()
+
+    @app.get("/api/study/notifications")
+    async def study_notifications():
+        return {"notifications": rt.pending_notifications()}
+
+    @app.post("/api/study/notifications/ack")
+    async def study_notifications_ack():
+        rt.ack_notifications()
+        return {"ok": True}
+
+    @app.post("/api/study/complete_reminder")
+    async def study_complete_reminder(body: dict):
+        rid = str(body.get("reminder_id") or "")
+        if not rid:
+            raise HTTPException(status_code=400, detail="缺少参数 reminder_id")
+        ok = rt.repo_study.complete_reminder(rid)
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"未找到提醒 {rid}")
+        return {"ok": True}
+
+    @app.post("/api/study/log_session")
+    async def study_log_session(body: dict):
+        subject = str(body.get("subject") or "").strip()
+        minutes = int(body.get("minutes") or 0)
+        if not subject or minutes <= 0:
+            raise HTTPException(status_code=400, detail="缺少参数 subject/minutes")
+        session = rt.repo_study.log_session(
+            subject=subject,
+            minutes=minutes,
+            note=str(body.get("note") or "").strip(),
+            plan_id=str(body.get("plan_id") or "") or None,
+        )
+        return {"session": session, "today_minutes": rt.repo_study.today_minutes()}
 
     # ---------- 静态 UI（PWA） ----------
 

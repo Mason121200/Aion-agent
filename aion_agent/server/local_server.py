@@ -9,6 +9,11 @@
     GET    /api/history                会话历史
     GET    /api/memory                 认知记忆列表
     DELETE /api/memory/{rel_id}        删除三元组（软删除）
+    GET    /api/study/overview         学习概览（计划/进度/提醒/资料）
+    POST   /api/study/complete_reminder 完成提醒
+    POST   /api/study/log_session      记录学习时长
+    GET    /api/study/notifications    待展示的到期提醒
+    POST   /api/study/notifications/ack 确认已展示提醒
     GET    / /static/* /sw.js          Web UI（PWA）
 
 零第三方依赖（不依赖 fastapi / uvicorn / pydantic），
@@ -155,6 +160,10 @@ class LocalHandler(BaseHTTPRequestHandler):
             elif path == "/api/memory":
                 user_id = q.get("user_id", "chat_user")
                 self._send_json(200, self._memory_payload(rt, user_id))
+            elif path == "/api/study/overview":
+                self._send_json(200, rt.repo_study.overview())
+            elif path == "/api/study/notifications":
+                self._send_json(200, {"notifications": rt.pending_notifications()})
             elif path.startswith("/api/"):
                 self._send_error_json(404, "unknown api")
             else:
@@ -184,6 +193,33 @@ class LocalHandler(BaseHTTPRequestHandler):
                 })
             elif path == "/api/chat":
                 self._stream_chat(body)
+            elif path == "/api/study/complete_reminder":
+                rid = str(body.get("reminder_id") or "")
+                if not rid:
+                    raise ConfigError("缺少参数 reminder_id")
+                ok = rt.repo_study.complete_reminder(rid)
+                if not ok:
+                    self._send_error_json(404, f"未找到提醒 {rid}")
+                    return
+                self._send_json(200, {"ok": True})
+            elif path == "/api/study/notifications/ack":
+                rt.ack_notifications()
+                self._send_json(200, {"ok": True})
+            elif path == "/api/study/log_session":
+                subject = str(body.get("subject") or "").strip()
+                minutes = int(body.get("minutes") or 0)
+                if not subject or minutes <= 0:
+                    raise ConfigError("缺少参数 subject/minutes")
+                session = rt.repo_study.log_session(
+                    subject=subject,
+                    minutes=minutes,
+                    note=str(body.get("note") or "").strip(),
+                    plan_id=str(body.get("plan_id") or "") or None,
+                )
+                self._send_json(200, {
+                    "session": session,
+                    "today_minutes": rt.repo_study.today_minutes(),
+                })
             else:
                 self._send_error_json(404, "unknown api")
         except ConfigError as e:
