@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -24,9 +25,14 @@ from aion_agent.llm.openai_compatible import (
     load_env_from_dotenv,
 )
 from aion_agent.pipeline.cognition_pipeline import CognitionPipeline
+from aion_agent.planner.planner_repo import JsonPlanRepo
+from aion_agent.skills import build_default_skills
+from aion_agent.storage.execution_log import JsonExecutionLog
 from aion_agent.storage.in_memory_cognitive_repo import InMemoryCognitiveRepo
 from aion_agent.storage.json_chat_repo import JsonChatRepo
 from aion_agent.study.study_repo import JsonStudyRepo
+from aion_agent.sync import SYNC_FILES, build_bundle, get_device_id, merge_bundle, pull_bundle
+from aion_agent.tools.executor import ToolPolicy
 from aion_agent.use_cases.react_chat_session import ReActChatSession
 
 logger = logging.getLogger(__name__)
@@ -105,6 +111,14 @@ class AppRuntime:
         )
         self._chat_repo = JsonChatRepo(persist_dir=self.data_dir)
         self._study_repo = JsonStudyRepo(persist_dir=self.data_dir)
+        self._planner_repo = JsonPlanRepo(persist_dir=self.data_dir)
+        self._execution_log = JsonExecutionLog(persist_dir=self.data_dir)
+        self._tool_policy = ToolPolicy.from_dict(
+            self._load_json_file(self.data_dir / "tool_policy.json", None)
+        )
+        self._skills_config: Dict[str, bool] = self._load_json_file(
+            self.data_dir / "skills.json", {}
+        ) or {}
         self._pipeline = CognitionPipeline(
             cognitive_repo=self._repo, embedder=self._embedder
         )
@@ -190,6 +204,12 @@ class AppRuntime:
             chat_repo=self._chat_repo,
             pipeline=self._pipeline,
             study_repo=self._study_repo,
+            planner_repo=self._planner_repo,
+            execution_log=self._execution_log,
+            tool_policy=self._tool_policy,
+            disabled_skills={
+                name for name, enabled in self._skills_config.items() if not enabled
+            },
             user_id=user_id,
             session_id=session_id,
         )
@@ -211,6 +231,91 @@ class AppRuntime:
     @property
     def repo_study(self) -> JsonStudyRepo:
         return self._study_repo
+
+    @property
+    def repo_planner(self) -> JsonPlanRepo:
+        return self._planner_repo
+
+    @property
+    def execution_log(self) -> JsonExecutionLog:
+        return self._execution_log
+
+    @property
+    def tool_policy(self) -> ToolPolicy:
+        return self._tool_policy
+
+    # ---------- 工具权限策略 ----------
+
+    def set_tool_policy(self, *, blocked=None, confirm=None) -> None:
+        self._tool_policy.set_blocked(blocked)
+        self._tool_policy.set_confirm(confirm)
+        self._save_json_file(
+            self.data_dir / "tool_policy.json", self._tool_policy.to_dict()
+        )
+
+    # ---------- 跨设备同步 ----------
+
+    @property
+    def device_id(self) -> str:
+        return get_device_id(self.data_dir)
+
+    def sync_export(self) -> dict:
+        return build_bundle(self.data_dir)
+
+    def sync_import(self, bundle: dict) -> dict:
+        return merge_bundle(self.data_dir, bundle)
+
+    def sync_pull(self, url: str) -> dict:
+        bundle = pull_bundle(url)
+        return merge_bundle(self.data_dir, bundle)
+
+    def sync_status(self) -> dict:
+        files = {}
+        for name in SYNC_FILES:
+            p = self.data_dir / name
+            files[name] = p.stat().st_size if p.exists() else 0
+        return {"device_id": self.device_id, "files": files}
+
+    # ---------- 技能启停 ----------
+
+    def is_skill_enabled(self, name: str) -> bool:
+        return bool(self._skills_config.get(name, True))
+
+    def set_skill_enabled(self, name: str, enabled: bool) -> bool:
+        known = {
+            s.name
+            for s in build_default_skills(
+                cognitive_repo=self._repo,
+                study_repo=self._study_repo,
+                planner_repo=self._planner_repo,
+                user_id="chat_user",
+            )
+        }
+        if name not in known:
+            return False
+        self._skills_config[name] = bool(enabled)
+        self._save_json_file(self.data_dir / "skills.json", self._skills_config)
+        return True
+
+    # ---------- JSON 持久化小工具 ----------
+
+    @staticmethod
+    def _load_json_file(path: Path, default):
+        try:
+            if path.exists():
+                with open(path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"读取 {path.name} 失败: {e}")
+        return default
+
+    def _save_json_file(self, path: Path, data) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"写入 {path.name} 失败: {e}")
 
     # ---------- 提醒通知 ----------
 

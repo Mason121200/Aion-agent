@@ -510,6 +510,10 @@ class InMemoryCognitiveRepo(ICognitiveRepo):
         self._save_persisted()
         return state.state_id
 
+    async def get_state(self, state_id: str):
+        """按 id 获取状态（含已释放），供任务联动读取"""
+        return self._states.get(state_id)
+
     async def get_active_states(
         self, user_id: str, session_id: Optional[str] = None
     ) -> List[AgentState]:

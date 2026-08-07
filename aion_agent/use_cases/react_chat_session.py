@@ -22,13 +22,8 @@ from aion_agent.pipeline.cognition_pipeline import CognitionPipeline
 from aion_agent.storage.hash_embedder import HashEmbedder
 from aion_agent.storage.in_memory_cognitive_repo import InMemoryCognitiveRepo
 from aion_agent.storage.json_chat_repo import JsonChatRepo
-from aion_agent.tools import (
-    ToolExecutor,
-    ToolRegistry,
-    register_builtin_tools,
-    register_cognition_tools,
-    register_study_tools,
-)
+from aion_agent.skills import SkillRegistry, build_default_skills
+from aion_agent.tools import ToolExecutor, ToolRegistry
 from aion_agent.use_cases.cognition_injector import CognitionInjector
 from aion_agent.use_cases.react.prompts import REACT_TOOL_HINT
 from aion_agent.use_cases.react.react_loop import ReActLoop
@@ -95,6 +90,11 @@ class ReActChatSession:
         max_tokens_budget: int = 20000,
         max_context_messages: int = 20,
         study_repo=None,
+        planner_repo=None,
+        execution_log=None,
+        tool_policy=None,
+        tool_auto_approve: bool = False,
+        disabled_skills=None,
         tools_enabled: bool = True,
         llm_reflect_enabled: bool = True,
         tool_timeout_seconds: int = 30,
@@ -117,6 +117,8 @@ class ReActChatSession:
         self._max_tokens_budget = max_tokens_budget
         self._max_context_messages = max_context_messages
         self._study_repo = study_repo
+        self._planner_repo = planner_repo
+        self._execution_log = execution_log
         self._tools_enabled = tools_enabled
         self._llm_reflect_enabled = llm_reflect_enabled
         self._tool_timeout_seconds = tool_timeout_seconds
@@ -124,20 +126,24 @@ class ReActChatSession:
         # 工具层：注册内置工具（get_current_time / calculator / read_file）
         self._tool_registry: Optional[ToolRegistry] = None
         self._tool_executor: Optional[ToolExecutor] = None
+        self._skill_registry: Optional[SkillRegistry] = None
         if tools_enabled:
             self._tool_registry = ToolRegistry()
-            register_builtin_tools(self._tool_registry)
-            register_cognition_tools(
-                self._tool_registry, self._repo, user_id=self._user_id
+            self._skill_registry = SkillRegistry()
+            for skill in build_default_skills(
+                cognitive_repo=self._repo,
+                study_repo=self._study_repo,
+                planner_repo=self._planner_repo,
+                user_id=self._user_id,
+            ):
+                enabled = skill.name not in (disabled_skills or set())
+                self._skill_registry.install(skill, enabled=enabled)
+            self._skill_registry.apply_tools(self._tool_registry)
+            self._tool_executor = ToolExecutor(
+                self._tool_registry,
+                policy=tool_policy,
+                auto_approve=tool_auto_approve,
             )
-            if self._study_repo is not None:
-                register_study_tools(
-                    self._tool_registry,
-                    self._study_repo,
-                    cognitive_repo=self._repo,
-                    user_id=self._user_id,
-                )
-            self._tool_executor = ToolExecutor(self._tool_registry)
 
     # ==================== 会话 ====================
 
@@ -169,6 +175,12 @@ class ReActChatSession:
             role="user",
             content=user_message,
         ))
+        if self._execution_log is not None:
+            self._execution_log.append(
+                session_id=self._session_id,
+                event_type="user_message",
+                content=user_message,
+            )
 
         # 2) 从窗口加载历史（多取一些，窗口裁剪由 ReActLoop 负责）
         history = await self._chat_repo.get_history(
@@ -220,6 +232,7 @@ class ReActChatSession:
             max_context_messages=self._max_context_messages,
             tool_timeout_seconds=self._tool_timeout_seconds,
             llm_reflect_enabled=self._llm_reflect_enabled,
+            execution_log=self._execution_log,
         )
 
         final_content = ""
@@ -232,6 +245,12 @@ class ReActChatSession:
                 final_content = event.get("content", "")
             elif event.get("type") == "cognition":
                 cognition_count += 1
+            elif event.get("type") == "error" and self._execution_log is not None:
+                self._execution_log.append(
+                    session_id=self._session_id,
+                    event_type="error",
+                    content=str(event.get("error", "")),
+                )
             yield event
 
         # 兜底：LLM 未输出任何认知块时，用规则提取明确的自我介绍
@@ -248,6 +267,12 @@ class ReActChatSession:
                 role="assistant",
                 content=saved_reply,
             ))
+            if self._execution_log is not None:
+                self._execution_log.append(
+                    session_id=self._session_id,
+                    event_type="assistant_reply",
+                    content=saved_reply,
+                )
 
     async def _rule_based_extract(self, user_message: str) -> list:
         """LLM 未输出认知块时的规则兜底：只提取高置信的自介绍句式"""

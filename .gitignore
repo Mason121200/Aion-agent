@@ -39,3 +39,7 @@ logs/
 Thumbs.db
 # ===== local verification data =====
 .local_data/
+.pytest_tmp/
+
+# ===== 临时构建/补丁脚本 =====
+.tmp_build/

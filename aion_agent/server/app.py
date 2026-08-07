@@ -47,11 +47,40 @@ from aion_agent.llm.openai_compatible import (
     load_env_from_dotenv,
 )
 from aion_agent.pipeline.cognition_pipeline import CognitionPipeline
+from aion_agent.skills import build_default_skills
 from aion_agent.storage.in_memory_cognitive_repo import InMemoryCognitiveRepo
 from aion_agent.storage.json_chat_repo import JsonChatRepo
 from aion_agent.use_cases.react_chat_session import ReActChatSession
 
 logger = logging.getLogger(__name__)
+
+def _catalog_tools(rt: AppRuntime) -> list:
+    """构建一次性的工具目录：默认技能全量注册，返回工具名 + 权限 + 所属技能"""
+    from aion_agent.skills import build_default_skills
+    from aion_agent.tools import ToolRegistry
+
+    skills = build_default_skills(
+        cognitive_repo=rt.repo,
+        study_repo=rt.repo_study,
+        planner_repo=rt.repo_planner,
+        user_id="chat_user",
+    )
+    registry = ToolRegistry()
+    skill_of: Dict[str, str] = {}
+    for skill in skills:
+        for name in skill.tools:
+            skill_of[name] = skill.name
+        skill.register_tools(registry)
+    return [
+        {
+            "name": e["name"],
+            "permission": e["permission"],
+            "level": e["level"],
+            "skill": skill_of.get(e["name"], ""),
+        }
+        for e in registry.list_tool_entries()
+    ]
+
 
 def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
     rt = runtime or AppRuntime()
@@ -219,6 +248,84 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
     @app.get("/sw.js")
     async def service_worker():
         return FileResponse(_ui_dir() / "sw.js", media_type="application/javascript")
+
+    # ---------- 执行日志 ----------
+
+    @app.get("/api/execution_log")
+    async def execution_log(session_id: str = "", event_type: str = "", limit: int = 100):
+        return {
+            "events": rt.execution_log.query(
+                session_id=session_id or None,
+                event_type=event_type or None,
+                limit=limit,
+            )
+        }
+
+    # ---------- 通用任务规划 ----------
+
+    @app.get("/api/plans")
+    async def list_plans(status: str = ""):
+        return {"plans": rt.repo_planner.list_plans(status=status or None)}
+
+    # ---------- 跨设备同步 ----------
+
+    @app.get("/api/sync/export")
+    async def sync_export():
+        return rt.sync_export()
+
+    @app.post("/api/sync/import")
+    async def sync_import(body: dict):
+        bundle = body.get("bundle")
+        if not isinstance(bundle, dict):
+            raise HTTPException(status_code=400, detail="缺少参数 bundle")
+        return {"merged": rt.sync_import(bundle)}
+
+    @app.post("/api/sync/pull")
+    async def sync_pull(body: dict):
+        url = str(body.get("url") or "").strip()
+        if not url:
+            raise HTTPException(status_code=400, detail="缺少参数 url")
+        try:
+            return {"merged": rt.sync_pull(url)}
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"拉取失败: {e}")
+
+    @app.get("/api/sync/status")
+    async def sync_status():
+        return rt.sync_status()
+
+    # ---------- 技能 / 工具 ----------
+
+    @app.get("/api/skills")
+    async def list_skills():
+        skills = []
+        for s in build_default_skills(
+            cognitive_repo=rt.repo,
+            study_repo=rt.repo_study,
+            planner_repo=rt.repo_planner,
+            user_id="chat_user",
+        ):
+            skills.append({**s.to_dict(), "enabled": rt.is_skill_enabled(s.name)})
+        return {"skills": skills}
+
+    @app.post("/api/skills/{name}/toggle")
+    async def toggle_skill(name: str, body: dict):
+        enabled = bool(body.get("enabled", True))
+        if not rt.set_skill_enabled(name, enabled):
+            raise HTTPException(status_code=404, detail=f"未找到技能: {name}")
+        return {"name": name, "enabled": enabled}
+
+    @app.get("/api/tools")
+    async def list_tools():
+        return {"tools": _catalog_tools(rt), "policy": rt.tool_policy.to_dict()}
+
+    @app.post("/api/tools/policy")
+    async def set_tool_policy(body: dict):
+        rt.set_tool_policy(
+            blocked=body.get("blocked") or [],
+            confirm=body.get("confirm") or [],
+        )
+        return {"policy": rt.tool_policy.to_dict()}
 
     app.mount("/static", StaticFiles(directory=_ui_dir()), name="static")
 
