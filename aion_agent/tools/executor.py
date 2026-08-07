@@ -17,11 +17,57 @@ from aion_agent.core.ports.i_tool_registry import IToolRegistry
 logger = logging.getLogger(__name__)
 
 
-class ToolExecutor(IToolExecutor):
-    """工具执行器（MVP）"""
+class ToolPolicy:
+    """工具权限策略：blocked（禁用）/ confirm（需用户确认）
 
-    def __init__(self, registry: IToolRegistry):
+    - blocked: 无论注册表权限如何，一律拒绝执行
+    - confirm: 标记为需确认，未开启 auto_approve 时拒绝执行
+    策略可持久化（tool_policy.json）并热更新。
+    """
+
+    def __init__(self, blocked=None, confirm=None):
+        self._blocked = set(str(x) for x in (blocked or []))
+        self._confirm = set(str(x) for x in (confirm or []))
+
+    def is_blocked(self, name: str) -> bool:
+        return name in self._blocked
+
+    def requires_confirm(self, name: str) -> bool:
+        return name in self._confirm
+
+    def set_blocked(self, names) -> None:
+        self._blocked = set(str(x) for x in (names or []))
+
+    def set_confirm(self, names) -> None:
+        self._confirm = set(str(x) for x in (names or []))
+
+    def to_dict(self) -> dict:
+        return {
+            "blocked": sorted(self._blocked),
+            "confirm": sorted(self._confirm),
+        }
+
+    @classmethod
+    def from_dict(cls, data) -> "ToolPolicy":
+        data = data or {}
+        return cls(
+            blocked=data.get("blocked") or [],
+            confirm=data.get("confirm") or [],
+        )
+
+
+class ToolExecutor(IToolExecutor):
+    """工具执行器（含权限策略拦截）"""
+
+    def __init__(
+        self,
+        registry: IToolRegistry,
+        policy: Optional[ToolPolicy] = None,
+        auto_approve: bool = False,
+    ):
         self._registry = registry
+        self._policy = policy
+        self._auto_approve = auto_approve
 
     async def execute(
         self,
@@ -42,6 +88,27 @@ class ToolExecutor(IToolExecutor):
                 success=False,
                 error=f"工具 '{tool_name}' 缺少处理函数",
                 error_code="TOOL_NOT_FOUND",
+            )
+
+        level = entry.get("level", "skill")
+        if (
+            self._policy is not None
+            and self._policy.is_blocked(tool_name)
+            and level != "system"
+        ):
+            return ToolResult(
+                success=False,
+                error=f"工具已被禁用: {tool_name}",
+                error_code="TOOL_BLOCKED",
+            )
+        permission = entry.get("permission", "auto")
+        if self._policy is not None and self._policy.requires_confirm(tool_name):
+            permission = "confirm"
+        if permission == "confirm" and not self._auto_approve:
+            return ToolResult(
+                success=False,
+                error=f"工具需要用户确认后才可执行: {tool_name}（当前未开启自动执行）",
+                error_code="NEEDS_CONFIRM",
             )
 
         clean_args = args or {}

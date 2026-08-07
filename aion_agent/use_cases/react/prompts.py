@@ -49,6 +49,13 @@ REACT_TOOL_HINT = textwrap.dedent("""\
       * 需要主动回忆某段记忆 → search_cognition / search_by_relation / search_entity / search_notes；
       * 用户明确纠正某条记忆 → update_cognition / delete_cognition；
         用户明确确认 → confirm_cognition；发现重复 → merge_cognition。
+    - 长期任务规划（planner 工具）：
+      * 用户提出长期目标（项目/备考/健身/写作等）→ 调用 task_create；
+      * 必须把完整规划方案（背景、分阶段步骤、每日安排、验收标准、风险）写入
+        plan_text 参数，确保方案完整落盘，作为后续追踪进度的数据基础；
+      * 任务被暂停/停止/完成 → 调用 task_update 改 status 或 task_archive，
+        系统会自动联动释放记忆状态，无需手动清理；
+      * 定期检视进度 → task_checkin 记录决策日志，让任务可追溯。
     - 工具调用纪律：
       * 先调用工具，看到 Observation 结果后再给出最终回答；
       * 不要在工具执行完成前宣称「我已记住 / 我已完成」；
@@ -58,3 +65,14 @@ REACT_TOOL_HINT = textwrap.dedent("""\
     - 当任务已经完成、不需要再调用工具时，**直接输出最终回答即可**
       （不调用工具即视为任务完成，循环结束）。
 """)
+
+
+VERIFY_PROMPT = textwrap.dedent("""\
+    你是 Aion Agent 的验收官。系统会给你一段「工具执行结果摘要」和 Agent 的「最终答复」。
+    请核对最终答复：
+    1. 是否基于工具结果（没有虚构工具没返回的信息）；
+    2. 是否正面回答了用户的问题；
+    3. 失败的工具是否被如实说明，而不是假装成功。
+    输出严格 JSON：{"verified": true/false, "issues": "发现的问题（没有则留空）", "correction": "需要更正的内容（一句话，没有则留空）"}
+    verified=true 表示答复可靠；verified=false 时 correction 必须给出简短更正。
+    """)

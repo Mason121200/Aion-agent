@@ -32,6 +32,7 @@ from aion_agent.use_cases.react.context_window import (
 )
 from aion_agent.use_cases.react.observe import observe
 from aion_agent.use_cases.react.reflect import reflect, reflect_with_llm
+from aion_agent.use_cases.react.verify import format_correction, verify_with_llm
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,8 @@ class ReActLoop:
         max_context_messages: int = 20,
         tool_timeout_seconds: int = 30,
         llm_reflect_enabled: bool = True,
+        verify_enabled: bool = True,
+        execution_log=None,
     ):
         self._llm = llm_client
         self._user_id = user_id
@@ -92,6 +95,9 @@ class ReActLoop:
         self._max_context_messages = max_context_messages
         self._tool_timeout_seconds = tool_timeout_seconds
         self._llm_reflect_enabled = llm_reflect_enabled
+        self._verify_enabled = verify_enabled
+        self._execution_log = execution_log
+        self._all_tool_results: List[Dict[str, Any]] = []
 
         self._step_count = 0
         self._total_tokens = 0
@@ -231,6 +237,18 @@ class ReActLoop:
                                 or 0
                             )
                             self._total_tokens += step_tokens
+                            if self._execution_log is not None:
+                                self._execution_log.append(
+                                    session_id=self._session_id,
+                                    event_type="llm_call",
+                                    content=(full_visible or assistant_content)[-300:],
+                                    meta={
+                                        "turn": self._step_count,
+                                        "completion_tokens": step_tokens,
+                                        "total_tokens": self._total_tokens,
+                                        "tool_calls": len(current_tool_calls),
+                                    },
+                                )
                         break
             except Exception as e:
                 logger.error(f"[ReAct] LLM 调用失败: {e}", exc_info=True)
@@ -313,6 +331,27 @@ class ReActLoop:
                     "success": exec_result.success,
                     "error": exec_result.error if not exec_result.success else None,
                 })
+                self._all_tool_results.append(tool_results_for_turn[-1])
+                if self._execution_log is not None:
+                    self._execution_log.append(
+                        session_id=self._session_id,
+                        event_type="tool_call",
+                        content=tool_name,
+                        meta={"args": tool_args, "tool_call_id": tool_call_id},
+                    )
+                    self._execution_log.append(
+                        session_id=self._session_id,
+                        event_type="tool_result",
+                        content=(
+                            obs["content"] if exec_result.success
+                            else str(exec_result.error)
+                        )[:500],
+                        meta={
+                            "tool": tool_name,
+                            "success": exec_result.success,
+                            "tool_call_id": tool_call_id,
+                        },
+                    )
 
             # ---- Reflect ----
             if self._llm_reflect_enabled:
@@ -333,6 +372,13 @@ class ReActLoop:
                     "reason": reflect_result.get("reason", ""),
                     "correction": reflect_result.get("correction", ""),
                 }
+                if self._execution_log is not None:
+                    self._execution_log.append(
+                        session_id=self._session_id,
+                        event_type="reflect",
+                        content=reflect_result.get("reason", ""),
+                        meta={"action": reflect_result["action"]},
+                    )
 
             action = reflect_result["action"]
             if action == "stop":
@@ -369,6 +415,42 @@ class ReActLoop:
                     "（已达到最大步数，未产生可用的中间结果，任务未能完成。"
                     "如需继续，请告诉我。）"
                 )
+
+        if (
+            self._verify_enabled
+            and self._llm_reflect_enabled
+            and self._all_tool_results
+            and self._total_tokens < self._max_tokens_budget
+        ):
+            try:
+                verify_result = await verify_with_llm(
+                    self._llm,
+                    tool_results=self._all_tool_results,
+                    final_reply=final_content,
+                    turn=max(self._step_count - 1, 0),
+                )
+                if not verify_result.get("verified") and verify_result.get("correction"):
+                    correction_text = format_correction(
+                        "", verify_result["correction"]
+                    )
+                    final_content = format_correction(
+                        final_content, verify_result["correction"]
+                    )
+                    # 更正也作为 token 流出，确保 UI 可见且写入持久化回复
+                    yield {"type": "token", "content": correction_text}
+                if self._execution_log is not None:
+                    self._execution_log.append(
+                        session_id=self._session_id,
+                        event_type="verify",
+                        content=verify_result.get("issues", ""),
+                        meta={
+                            "verified": verify_result.get("verified"),
+                            "correction": verify_result.get("correction", ""),
+                        },
+                    )
+                yield {"type": "verify", **verify_result}
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[ReAct] 验收环节异常，跳过: {e}")
 
         yield {"type": "final", "content": final_content}
         yield {

@@ -23,7 +23,10 @@ class TestRegistry:
         registry, _ = _env()
         tools = registry.list_tools()
         names = {t["function"]["name"] for t in tools}
-        assert names == {"get_current_time", "calculator", "read_file"}
+        assert names == {
+            "get_current_time", "calculator", "read_file",
+            "file_write", "file_list", "web_fetch", "shell",
+        }
 
     def test_get_and_is_registered(self):
         registry, _ = _env()

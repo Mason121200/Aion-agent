@@ -15,6 +15,8 @@ class IToolRegistry(ABC):
         name: str,
         func: Callable,
         schema: Optional[Dict[str, Any]] = None,
+        permission: str = "auto",
+        level: str = "skill",
     ) -> None:
         """注册工具（同步操作，在启动时调用）"""
         ...

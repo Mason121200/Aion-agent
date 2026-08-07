@@ -29,6 +29,16 @@ const els = {
   studyBody: document.getElementById("study-body"),
   studyMask: document.getElementById("study-mask"),
   btnCloseStudy: document.getElementById("btn-close-study"),
+  btnSkills: document.getElementById("btn-skills"),
+  skillsPanel: document.getElementById("skills-panel"),
+  skillsBody: document.getElementById("skills-body"),
+  skillsMask: document.getElementById("skills-mask"),
+  btnCloseSkills: document.getElementById("btn-close-skills"),
+  btnSync: document.getElementById("btn-sync"),
+  syncPanel: document.getElementById("sync-panel"),
+  syncBody: document.getElementById("sync-body"),
+  syncMask: document.getElementById("sync-mask"),
+  btnCloseSync: document.getElementById("btn-close-sync"),
   notifyBanner: document.getElementById("notify-banner"),
 };
 
@@ -560,6 +570,7 @@ async function init() {
     await refreshMemory();
     await refreshStudy();
     startNotificationPolling();
+    await refreshSkills();
   } catch (e) {
     toast("初始化失败: " + e.message, 4000);
   }
@@ -638,5 +649,156 @@ function closeStudy() {
 els.btnStudy.addEventListener("click", openStudy);
 els.btnCloseStudy.addEventListener("click", closeStudy);
 els.studyMask.addEventListener("click", closeStudy);
+
+function openSkills() {
+  els.skillsPanel.classList.remove("hidden");
+  els.skillsMask.classList.remove("hidden");
+  refreshSkills();
+}
+function closeSkills() {
+  els.skillsPanel.classList.add("hidden");
+  els.skillsMask.classList.add("hidden");
+}
+els.btnSkills.addEventListener("click", openSkills);
+els.btnCloseSkills.addEventListener("click", closeSkills);
+els.skillsMask.addEventListener("click", closeSkills);
+
+function openSync() {
+  els.syncPanel.classList.remove("hidden");
+  els.syncMask.classList.remove("hidden");
+  refreshSync();
+}
+function closeSync() {
+  els.syncPanel.classList.add("hidden");
+  els.syncMask.classList.add("hidden");
+}
+els.btnSync.addEventListener("click", openSync);
+els.btnCloseSync.addEventListener("click", closeSync);
+els.syncMask.addEventListener("click", closeSync);
+
+async function refreshSync() {
+  try {
+    const st = await api("/api/sync/status");
+    const files = Object.entries(st.files || {})
+      .map(function (kv) { return "<code>" + esc(kv[0]) + "</code> " + kv[1] + "B"; })
+      .join(" ");
+    els.syncBody.innerHTML =
+      '<div class="dim small">设备标识：<code>' + esc(st.device_id) + '</code></div>' +
+      '<div class="dim small">参与同步的数据文件：' + files + '</div>' +
+      '<div class="sync-section"><strong>① 导出数据包</strong>' +
+      '<div class="dim small">把本机全部数据（记忆/会话/学习/任务/配置）打包成可迁移 JSON</div>' +
+      '<button class="mini" id="btn-sync-export">导出并复制</button></div>' +
+      '<div class="sync-section"><strong>② 从另一台设备拉取</strong>' +
+      '<input id="sync-url" type="text" placeholder="http://192.168.x.x:8010" value="">' +
+      '<button class="mini" id="btn-sync-pull">拉取并合并</button></div>' +
+      '<div class="sync-section"><strong>③ 导入数据包</strong>' +
+      '<textarea id="sync-import-area" rows="4" placeholder="粘贴导出的 JSON 数据包"></textarea>' +
+      '<button class="mini" id="btn-sync-import">导入并合并</button></div>' +
+      '<div class="dim small">合并规则：按记录 id 去重、时间新者优先；执行日志与设备标识不同步。导入前建议先导出备份。</div>';
+    document.getElementById("btn-sync-export").addEventListener("click", doSyncExport);
+    document.getElementById("btn-sync-pull").addEventListener("click", doSyncPull);
+    document.getElementById("btn-sync-import").addEventListener("click", doSyncImport);
+  } catch (e) {
+    els.syncBody.innerHTML = '<div class="dim">同步状态加载失败：' + esc(e.message) + '</div>';
+  }
+}
+
+async function doSyncExport() {
+  try {
+    const bundle = await api("/api/sync/export");
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(JSON.stringify(bundle));
+      toast("已导出并复制数据包到剪贴板", 2600);
+    } else {
+      els.syncBody.querySelector("#sync-import-area").value = JSON.stringify(bundle);
+      toast("已导出到下方输入框，请复制保存", 2600);
+    }
+  } catch (e) {
+    toast("导出失败：" + e.message, 3000);
+  }
+}
+
+async function doSyncPull() {
+  const url = document.getElementById("sync-url").value.trim();
+  if (!url) { toast("请输入对端地址", 2000); return; }
+  try {
+    const r = await api("/api/sync/pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: url }),
+    });
+    toast("已合并 " + (r.merged.total || 0) + " 个数据文件", 2600);
+    refreshSync();
+  } catch (e) {
+    toast("拉取失败：" + e.message, 3200);
+  }
+}
+
+async function doSyncImport() {
+  const text = document.getElementById("sync-import-area").value.trim();
+  if (!text) { toast("请先粘贴数据包 JSON", 2000); return; }
+  try {
+    const bundle = JSON.parse(text);
+    const r = await api("/api/sync/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bundle: bundle }),
+    });
+    toast("已合并 " + (r.merged.total || 0) + " 个数据文件", 2600);
+    refreshSync();
+  } catch (e) {
+    toast("导入失败：" + e.message, 3200);
+  }
+}
+
+async function refreshSkills() {
+  try {
+    const data = await api("/api/skills");
+    const toolsData = await api("/api/tools");
+    const skills = data.skills || [];
+    const tools = toolsData.tools || [];
+    const policy = toolsData.policy || {};
+    const blocked = new Set(policy.blocked || []);
+    const confirm = new Set(policy.confirm || []);
+    let html = "";
+    const levelName = { system: "系统核心", builtin: "框架内置", skill: "技能" };
+    for (const s of skills) {
+      const fixed = s.level === "system" || s.level === "builtin";
+      const badge = '<span class="badge">' + esc(levelName[s.level] || s.level) + '</span>' +
+        (fixed ? '<span class="badge badge-fixed">🔒 固化</span>' : "");
+      const btn = fixed
+        ? '<span class="dim small">不可禁用</span>'
+        : (s.enabled
+            ? '<button class="mini" data-skill="' + esc(s.name) + '" data-enable="0">停用</button>'
+            : '<button class="mini" data-skill="' + esc(s.name) + '" data-enable="1">启用</button>');
+      html += '<div class="skill-card">' +
+        '<div><strong>' + esc(s.name) + '</strong> <span class="dim">v' + esc(s.version) + '</span> ' + badge + '</div>' +
+        '<div class="dim small">' + esc(s.description) + '</div>' +
+        '<div class="skill-tools small">' + (s.tools || []).map(function (t) {
+          const tag = blocked.has(t) ? " 🔒禁用" : (confirm.has(t) ? " ⚠️需确认" : "");
+          return "<code>" + esc(t) + "</code>" + tag;
+        }).join(" ") + '</div>' +
+        '<div class="skill-actions">' + btn + '</div>' +
+        '</div>';
+    }
+    els.skillsBody.innerHTML = html ||
+      '<div class="dim">暂无技能</div>';
+    els.skillsBody.querySelectorAll("[data-skill]").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        const name = btn.dataset.skill;
+        const enabled = btn.dataset.enable === "1";
+        await api("/api/skills/" + encodeURIComponent(name) + "/toggle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: enabled }),
+        });
+        toast((enabled ? "已启用" : "已停用") + "技能：" + name, 2000);
+        refreshSkills();
+      });
+    });
+  } catch (e) {
+    els.skillsBody.innerHTML = '<div class="dim">技能加载失败：' + esc(e.message) + '</div>';
+  }
+}
 
 init();

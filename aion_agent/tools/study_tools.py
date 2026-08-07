@@ -601,9 +601,10 @@ def register_study_tools(
     study_repo: JsonStudyRepo,
     cognitive_repo: Optional[ICognitiveRepo] = None,
     user_id: str = "chat_user",
+    level: str = "skill",
 ) -> None:
-    """注册 13 个学习工具（handler 与 schema 成对注册）"""
+    """注册 13 个学习工具（handler 与 schema 成对注册，T2 技能层）"""
     handlers = _make_handlers(study_repo, cognitive_repo, user_id)
     for tool in _STUDY_TOOLS:
         name = tool["function"]["name"]
-        registry.register(name, handlers[name], schema=tool)
+        registry.register(name, handlers[name], schema=tool, level=level)

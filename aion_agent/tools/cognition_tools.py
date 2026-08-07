@@ -442,10 +442,11 @@ def register_cognition_tools(
     registry: IToolRegistry,
     repo: ICognitiveRepo,
     user_id: str = "default",
+    level: str = "system",
 ) -> None:
-    """把 9 个认知工具注册进注册表（handler 与 schema 成对注册）"""
+    """把 9 个认知工具注册进注册表（handler 与 schema 成对注册，T0 系统固化层）"""
     handlers = _make_handlers(repo, user_id)
     for tool in _COGNITION_TOOL_SCHEMAS:
         name = tool["function"]["name"]
-        registry.register(name, handlers[name], schema=tool)
+        registry.register(name, handlers[name], schema=tool, level=level)
     logger.info(f"已注册 {len(_COGNITION_TOOL_SCHEMAS)} 个认知工具（user_id={user_id}）")

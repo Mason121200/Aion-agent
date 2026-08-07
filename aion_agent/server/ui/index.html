@@ -27,6 +27,8 @@
       <button id="btn-del" class="icon-btn" title="删除当前会话">🗑</button>
       <button id="btn-memory" class="icon-btn" title="记忆">🧠</button>
       <button id="btn-study" class="icon-btn" title="学习">📚</button>
+      <button id="btn-skills" class="icon-btn" title="技能">🧩</button>
+      <button id="btn-sync" class="icon-btn" title="同步">🔗</button>
     </div>
   </header>
 
@@ -62,6 +64,28 @@
 <div id="study-mask" class="mask hidden"></div>
 
 <!-- Toast -->
+
+<!-- 技能抽屉 -->
+
+<!-- 同步抽屉 -->
+<div id="sync-panel" class="panel hidden">
+  <div class="panel-head">
+    <h2>🔗 跨设备同步</h2>
+    <button id="btn-close-sync" class="icon-btn">✕</button>
+  </div>
+  <div id="sync-body" class="panel-body"></div>
+</div>
+<div id="sync-mask" class="mask hidden"></div>
+
+<div id="skills-panel" class="panel hidden">
+  <div class="panel-head">
+    <h2>🧩 技能 / 工具</h2>
+    <button id="btn-close-skills" class="icon-btn">✕</button>
+  </div>
+  <div id="skills-body" class="panel-body"></div>
+</div>
+<div id="skills-mask" class="mask hidden"></div>
+
 <div id="toast"></div>
 
 <script src="/static/app.js"></script>
