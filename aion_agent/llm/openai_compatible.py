@@ -333,11 +333,7 @@ class OpenAICompatibleClient(ILLMClient):
             if event["type"] == "__end__":
                 break
             if event["type"] == "error":
-                yield StreamChunk(
-                    content="", reasoning="", is_final=True,
-                    tool_calls=None, usage=None,
-                )
-                continue
+                raise RuntimeError(event.get("error") or "LLM ????")
 
             data = event["data"]
             try:

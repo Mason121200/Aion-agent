@@ -306,7 +306,7 @@ async function sendMessage(text) {
     bubble.classList.remove("typing");
     bubble.textContent = "⚠️ " + e.message;
     if (!state.health || !state.health.llm || !state.health.llm.configured) {
-      toast("请先在应用目录 .env 中配置 LLM API Key", 4000);
+      toast("请先点击右上角「⚙️ 设置」填写 LLM API Key", 4000);
     }
   } finally {
     state.sending = false;
@@ -351,8 +351,15 @@ function handleEvent(evt) {
       addChip("⚠️ " + (evt.note || "预算耗尽"));
       break;
     case "error":
-      toast("出错：" + (evt.error || "未知错误"), 4000);
+    case "error": {
+      const msg = evt.error || "未知错误";
+      toast("出错：" + msg, 6000);
+      const bubble = currentAssistant();
+      if (bubble && !bubble.textContent.trim()) {
+        bubble.textContent = "⚠️ " + msg;
+      }
       break;
+    }
     case "final":
       break;
   }
@@ -397,10 +404,19 @@ async function init() {
 
 function showConfigBanner(detail) {
   els.configBanner.innerHTML =
-    "⚠️ 未配置 LLM：请在服务目录放置 .env 文件（AION_LLM_API_KEY=你的密钥；可选 AION_LLM_BASE_URL / AION_LLM_MODEL），保存后重启服务。" +
+    "⚠️ 未配置 LLM：请点击右上角「⚙️ 设置」按钮，粘贴 DeepSeek API Key 后点「保存」（保存在手机本地，重启不丢失）。" +
     (detail ? "<br><span style=\"opacity:.8\">" + esc(detail) + "</span>" : "") +
-    "<button class=\"close\" id=\"btn-hide-banner\">✕</button>";
+    "<div class=\"banner-actions\"><button id=\"btn-open-settings\">⚙️ 去设置</button>" +
+    "<button class=\"close\" id=\"btn-hide-banner\">✕</button></div>";
   els.configBanner.classList.remove("hidden");
+  const openBtn = els.configBanner.querySelector("#btn-open-settings");
+  if (openBtn) openBtn.addEventListener("click", () => {
+    if (window.AionAndroid && window.AionAndroid.openSettings) {
+      window.AionAndroid.openSettings();
+    } else {
+      toast("请点击顶部「⚙️ 设置」按钮", 3000);
+    }
+  });
   const closeBtn = els.configBanner.querySelector(".close");
   if (closeBtn) closeBtn.addEventListener("click", () => els.configBanner.classList.add("hidden"));
 }

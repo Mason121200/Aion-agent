@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "android/**"
+      - "aion_agent/**"
       - ".github/workflows/build-apk.yml"
 
 jobs:

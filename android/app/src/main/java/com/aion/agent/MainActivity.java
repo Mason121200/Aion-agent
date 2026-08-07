@@ -8,6 +8,7 @@ import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.webkit.WebSettings;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.util.Log;
@@ -98,6 +99,17 @@ public class MainActivity extends Activity {
         ws.setDomStorageEnabled(true);
         ws.setDatabaseEnabled(true);
         webView.setWebViewClient(new WebViewClient());
+        webView.addJavascriptInterface(new Object() {
+            @JavascriptInterface
+            public void openSettings() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        showSettingsDialog();
+                    }
+                });
+            }
+        }, "AionAndroid");
         root.addView(webView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -201,6 +213,13 @@ public class MainActivity extends Activity {
         keyInput.setSingleLine(true);
         box.addView(keyInput);
 
+        TextView keyHint = new TextView(this);
+        keyHint.setText("在 platform.deepseek.com 创建 API Key（sk- 开头）；保存在手机本地，重启不丢失。");
+        keyHint.setTextColor(Color.parseColor("#94a3b8"));
+        keyHint.setTextSize(12);
+        keyHint.setPadding(dp(4), dp(2), dp(4), dp(8));
+        box.addView(keyHint);
+
         TextView urlLabel = new TextView(this);
         urlLabel.setText("服务器地址（一般保持默认即可）");
         urlLabel.setTextColor(Color.parseColor("#334155"));
@@ -226,15 +245,20 @@ public class MainActivity extends Activity {
                                 .putString(KEY_API_KEY, key)
                                 .putString(KEY_URL, url)
                                 .apply();
-                        if (!key.isEmpty()) {
+                        // 运行时立即生效：写入 .env 并重置 LLM 缓存（空 key = 清除）
+                        try {
+                            PyObject mod = Python.getInstance()
+                                    .getModule("aion_agent.server.local_server");
+                            mod.callAttr("set_api_key", key);
+                        } catch (Exception ignored) {
+                        }
+                        if (key.isEmpty()) {
+                            File env = new File(getFilesDir().getAbsolutePath(), ".env");
+                            if (env.exists()) env.delete();
+                            Toast.makeText(MainActivity.this,
+                                    "已清除 API Key", Toast.LENGTH_SHORT).show();
+                        } else {
                             writeEnvFile(getFilesDir().getAbsolutePath(), key);
-                            // 运行时立即生效：写入 .env 并重置 LLM 缓存
-                            try {
-                                PyObject mod = Python.getInstance()
-                                        .getModule("aion_agent.server.local_server");
-                                mod.callAttr("set_api_key", key);
-                            } catch (Exception ignored) {
-                            }
                             Toast.makeText(MainActivity.this,
                                     "API Key 已保存（保存在本机）", Toast.LENGTH_SHORT).show();
                         }
