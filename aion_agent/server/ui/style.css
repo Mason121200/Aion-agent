@@ -136,6 +136,12 @@ body {
   line-height: 1.5;
 }
 .banner .close { float: right; background: none; border: none; color: #fed7aa; cursor: pointer; font-size: 13px; }
+.banner-actions { display: flex; gap: 8px; margin-top: 6px; align-items: center; }
+.banner-actions button {
+  background: #fed7aa; color: #7c2d12; border: none; border-radius: 8px;
+  padding: 6px 12px; font-size: 12.5px; cursor: pointer;
+}
+.banner-actions .close { background: none; color: #fed7aa; float: none; margin-left: auto; }
 @media (max-width: 560px) {
   #session-select { max-width: 96px; }
 }
