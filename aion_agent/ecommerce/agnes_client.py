@@ -36,10 +36,20 @@ _LOCALHOST_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _uploads_root() -> Path:
-    """本地上传目录：与 server.runtime 的数据目录约定保持一致"""
+    """本地上传目录：优先取当前运行中的本地服务实际数据目录（与 /api/upload 落盘一致）。
+    APK 端 data_dir = getFilesDir()，不是 $AION_DATA_DIR/server，
+    非环境变量时必须使用 runtime 的实际 data_dir，否则参考图无法转 base64。"""
     override = os.environ.get("AION_DATA_DIR")
-    root = Path(override).expanduser() if override else Path.home() / ".aion_agent"
-    return root / "server" / "uploads"
+    if override:
+        return Path(override).expanduser() / "server" / "uploads"
+    try:
+        from aion_agent.server.local_server import get_runtime
+        rt = get_runtime()
+        if rt is not None and rt.data_dir is not None:
+            return rt.data_dir / "uploads"
+    except Exception:  # noqa: BLE001
+        pass
+    return Path.home() / ".aion_agent" / "server" / "uploads"
 
 
 def _file_to_data_uri(path: Path) -> str:

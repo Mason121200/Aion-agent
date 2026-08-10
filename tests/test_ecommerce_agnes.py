@@ -150,6 +150,40 @@ def test_resolve_missing_local_file_passthrough(monkeypatch, tmp_path):
     assert agnes_client._resolve_image_ref("/uploads/nope.png") == "/uploads/nope.png"
 
 
+def test_resolve_ref_uses_runtime_data_dir_like_apk(monkeypatch, tmp_path):
+    """APK \u573a\u666f\uff1astart_local_server \u4f20\u5165 data_dir = getFilesDir()\uff08\u65e0 /server \u540e\u7f00\uff09\uff0c
+    \u53c2\u8003\u56fe\u76ee\u5f55\u5e94\u4e0e /api/upload \u843d\u76d8\u76ee\u5f55\uff08rt.data_dir/uploads\uff09\u4e00\u81f4\u3002"""
+    import base64
+
+    from aion_agent.server import local_server as ls
+    from aion_agent.server.runtime import AppRuntime
+
+    rt = AppRuntime(data_dir=tmp_path)
+    monkeypatch.setattr(ls, "_runtime", rt)
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "a.png").write_bytes(_TINY_PNG)
+    expected = "data:image/png;base64," + base64.b64encode(_TINY_PNG).decode("ascii")
+    assert agnes_client._resolve_image_ref("/uploads/a.png") == expected
+
+
+def test_resolve_ref_env_var_takes_precedence(monkeypatch, tmp_path):
+    """\u663e\u5f0f AION_DATA_DIR \u4f18\u5148\u4e8e\u8fd0\u884c\u4e2d runtime\uff0c\u4fdd\u6301\u65e2\u6709\u8bed\u4e49\u3002"""
+    import base64
+
+    from aion_agent.server import local_server as ls
+    from aion_agent.server.runtime import AppRuntime
+
+    rt = AppRuntime(data_dir=tmp_path / "runtime_data")
+    monkeypatch.setattr(ls, "_runtime", rt)
+    env_uploads = tmp_path / "env" / "server" / "uploads"
+    env_uploads.mkdir(parents=True)
+    (env_uploads / "a.png").write_bytes(_TINY_PNG)
+    monkeypatch.setenv("AION_DATA_DIR", str(tmp_path / "env"))
+    expected = "data:image/png;base64," + base64.b64encode(_TINY_PNG).decode("ascii")
+    assert agnes_client._resolve_image_ref("/uploads/a.png") == expected
+
+
 def test_generate_image_converts_local_ref_to_data_uri(monkeypatch, tmp_path):
     import base64
 
