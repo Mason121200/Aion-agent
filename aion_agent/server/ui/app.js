@@ -83,7 +83,10 @@ function imgFail(el) {
 window.imgFail = imgFail;
 
 function imgHtml(url) {
-  return `<img class="md-img" src="${esc(url)}" alt="图片" loading="lazy" referrerpolicy="no-referrer" onerror="imgFail(this)">`;
+  const style = IS_APK
+    ? ' style="max-width:100%;max-height:60vh;width:auto;height:auto;object-fit:contain;border-radius:10px;"'
+    : "";
+  return `<img class="md-img" src="${esc(url)}" alt="\u56fe\u7247" loading="lazy" referrerpolicy="no-referrer" onerror="imgFail(this)"${style}>`;
 }
 
 
@@ -93,18 +96,48 @@ const IS_APK = !!window.AionAndroid;
 if (IS_APK) document.documentElement.classList.add("apk");
 
 function openLightbox(src, name) {
+  const abs = new URL(src, location.href).href;
   const overlay = document.createElement("div");
   overlay.className = "lightbox";
-  const abs = new URL(src, location.href).href;
-  overlay.innerHTML = `<div class="lightbox-body">
-    <img src="${esc(abs)}" alt="\u9884\u89c8" referrerpolicy="no-referrer" onerror="imgFail(this)">
-    <div class="lightbox-bar">
-      <span class="lb-name">${esc(name || "\u56fe\u7247")}</span>
-      <button class="lb-save">\u4fdd\u5b58\u56fe\u7247</button>
-      <button class="lb-close">\u5173\u95ed</button>
-    </div>
-  </div>`;
-  const saveBtn = overlay.querySelector(".lb-save");
+  Object.assign(overlay.style, {
+    position: "fixed", top: "0", left: "0", right: "0", bottom: "0",
+    zIndex: "999", display: "flex", flexDirection: "column",
+    alignItems: "center", justifyContent: "center",
+    background: "rgba(8, 12, 20, 0.94)", padding: "16px", boxSizing: "border-box",
+  });
+  const img = document.createElement("img");
+  img.src = abs;
+  img.alt = "\u9884\u89c8";
+  img.referrerPolicy = "no-referrer";
+  img.onerror = function () { imgFail(img); };
+  Object.assign(img.style, {
+    maxWidth: "96vw", maxHeight: "78vh", objectFit: "contain",
+    borderRadius: "10px", background: "#000",
+    boxShadow: "0 8px 40px rgba(0, 0, 0, 0.5)",
+  });
+  const bar = document.createElement("div");
+  Object.assign(bar.style, {
+    display: "flex", alignItems: "center", gap: "10px",
+    marginTop: "12px", maxWidth: "100%",
+  });
+  const nameSpan = document.createElement("span");
+  nameSpan.textContent = name || "\u56fe\u7247";
+  Object.assign(nameSpan.style, {
+    color: "#e2e8f0", fontSize: "13px", overflow: "hidden",
+    textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "38vw",
+  });
+  const saveBtn = document.createElement("button");
+  saveBtn.textContent = "\u4fdd\u5b58\u56fe\u7247";
+  Object.assign(saveBtn.style, {
+    border: "none", borderRadius: "999px", padding: "8px 16px",
+    fontSize: "13px", background: "#3b82f6", color: "#fff",
+  });
+  const closeBtn = document.createElement("button");
+  closeBtn.textContent = "\u5173\u95ed";
+  Object.assign(closeBtn.style, {
+    border: "none", borderRadius: "999px", padding: "8px 16px",
+    fontSize: "13px", background: "#334155", color: "#fff",
+  });
   saveBtn.addEventListener("click", () => {
     const extMatch = abs.split("?")[0].match(/\.(png|jpe?g|gif|webp|bmp)$/i);
     const base = (name || "aion_image").replace(/\.[^.]+$/, "");
@@ -117,10 +150,15 @@ function openLightbox(src, name) {
       window.open(abs, "_blank");
     }
   });
-  overlay.querySelector(".lb-close").addEventListener("click", () => overlay.remove());
+  closeBtn.addEventListener("click", () => overlay.remove());
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) overlay.remove();
   });
+  bar.appendChild(nameSpan);
+  bar.appendChild(saveBtn);
+  bar.appendChild(closeBtn);
+  overlay.appendChild(img);
+  overlay.appendChild(bar);
   document.body.appendChild(overlay);
 }
 
@@ -1512,7 +1550,13 @@ function updateSendState() {
 
 els.input.addEventListener("input", updateSendState);
 
-els.attach.addEventListener("click", () => els.fileInput.click());
+els.attach.addEventListener("click", () => {
+  if (IS_APK && window.AionAndroid && window.AionAndroid.pickImages) {
+    window.AionAndroid.pickImages();
+  } else {
+    els.fileInput.click();
+  }
+});
 
 els.fileInput.addEventListener("change", async () => {
   const files = Array.from(els.fileInput.files || []);
@@ -1535,6 +1579,29 @@ els.fileInput.addEventListener("change", async () => {
     }
   }
 });
+
+window.__aionUploadResult = function (json) {
+  let results = json;
+  if (typeof json === "string") {
+    try {
+      results = JSON.parse(json);
+    } catch (_) {
+      toast("\u4e0a\u4f20\u5931\u8d25\uff1a\u8fd4\u56de\u6570\u636e\u65e0\u6cd5\u89e3\u6790", 4000);
+      return;
+    }
+  }
+  let ok = 0;
+  for (const r of results) {
+    if (r && r.url) {
+      state.attachments.push({ url: r.url, name: r.name || "\u53c2\u8003\u56fe" });
+      ok++;
+    } else {
+      toast("\u4e0a\u4f20\u5931\u8d25\uff1a" + (r && r.error ? r.error : "\u672a\u77e5\u9519\u8bef"), 4000);
+    }
+  }
+  renderAttachments();
+  if (ok) toast("\u5df2\u6dfb\u52a0 " + ok + " \u5f20\u56fe\u7247", 2000);
+};
 
 document.getElementById("btn-sessions").addEventListener("click", () => {
   loadSessions().then(openSheet);

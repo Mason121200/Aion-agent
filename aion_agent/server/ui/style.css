@@ -499,3 +499,29 @@ button, .tab, .icon-btn, .btn-mini, .del-btn, .pin-btn, .lb-save, .lb-close {
   user-select: text;
   -webkit-user-select: text;
 }
+
+/* ---------- APK: constrain chat images (fallback, inline styles also applied) ---------- */
+.apk .md-img {
+  max-width: 100% !important;
+  max-height: 60vh !important;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+/* ---------- Image lightbox (inline styles also applied) ---------- */
+.lightbox {
+  position: fixed; inset: 0; z-index: 999;
+  background: rgba(8, 12, 20, 0.92);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 14px; box-sizing: border-box;
+}
+.lightbox img {
+  max-width: 96vw; max-height: 78vh;
+  object-fit: contain; border-radius: 10px; background: #000;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+.lightbox button {
+  border: none; border-radius: 999px; padding: 8px 16px;
+  font-size: 13px; cursor: pointer; background: #3b82f6; color: #fff;
+}

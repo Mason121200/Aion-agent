@@ -42,6 +42,12 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayOutputStream;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 /**
  * Aion Agent —— 真正的独立 App：
@@ -66,6 +72,7 @@ public class MainActivity extends Activity {
     private volatile boolean engineReady = false;
     private volatile String lastHealthError = "";
     private static final int REQ_FILE_CHOOSER = 1001;
+    private static final int REQ_PICK_IMAGES = 1003;
     private static final int REQ_WRITE_STORAGE = 1002;
     private ValueCallback<Uri[]> uploadCallback;
     private volatile String pendingSaveUrl;
@@ -300,6 +307,25 @@ public class MainActivity extends Activity {
             public void saveImage(final String url, final String name) {
                 saveImageToPhoneAsync(url, name);
             }
+            @JavascriptInterface
+            public void pickImages() {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+                            intent.setType("image/*");
+                            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                            startActivityForResult(intent, REQ_PICK_IMAGES);
+                        } catch (Exception e) {
+                            Toast.makeText(MainActivity.this,
+                                    "\u65e0\u6cd5\u6253\u5f00\u76f8\u518c\uff1a" + e.getMessage(),
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                });
+            }
+
         }, "AionAndroid");
         root.addView(webView, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -713,6 +739,115 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String nameFromUri(Uri uri) {
+        String seg = uri == null ? null : uri.getLastPathSegment();
+        String base = "aion_image";
+        String ext = ".png";
+        if (seg != null && !seg.isEmpty()) {
+            int dot = seg.lastIndexOf('.');
+            if (dot >= 0) {
+                base = seg.substring(0, dot);
+                ext = seg.substring(dot).toLowerCase();
+                if (ext.length() > 5 || ext.indexOf('/') >= 0) {
+                    ext = ".png";
+                }
+            } else {
+                base = seg;
+            }
+            base = base.replaceAll("[^A-Za-z0-9_-]", "_");
+            if (base.isEmpty()) {
+                base = "aion_image";
+            }
+        }
+        return base + ext;
+    }
+
+    private JSONObject uploadOneImage(Uri uri) throws Exception {
+        String name = nameFromUri(uri);
+        InputStream in = getContentResolver().openInputStream(uri);
+        ByteArrayOutputStream content = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            content.write(buf, 0, n);
+        }
+        in.close();
+        String boundary = "----aion" + System.currentTimeMillis()
+                + "x" + Math.abs((int) (Math.random() * 1000000));
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
+        body.write(("Content-Disposition: form-data; name=\"file\"; filename=\"" + name + "\"\r\n")
+                .getBytes(StandardCharsets.UTF_8));
+        body.write(("Content-Type: " + mimeFor(name) + "\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        body.write(content.toByteArray());
+        body.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+
+        HttpURLConnection conn = (HttpURLConnection) new URL(LOCAL_URL + "/api/upload").openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(30000);
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        conn.setRequestProperty("Content-Length", String.valueOf(body.size()));
+        OutputStream out = conn.getOutputStream();
+        out.write(body.toByteArray());
+        out.flush();
+        out.close();
+        int code = conn.getResponseCode();
+        InputStream res = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+        ByteArrayOutputStream rb = new ByteArrayOutputStream();
+        while (res != null && (n = res.read(buf)) > 0) {
+            rb.write(buf, 0, n);
+        }
+        if (res != null) {
+            res.close();
+        }
+        JSONObject result = new JSONObject();
+        if (code >= 200 && code < 300) {
+            JSONObject data = new JSONObject(new String(rb.toByteArray(), StandardCharsets.UTF_8));
+            result.put("url", data.optString("url"));
+            result.put("name", data.optString("name"));
+        } else {
+            result.put("error", "HTTP " + code);
+        }
+        return result;
+    }
+
+    private void uploadImagesAsync(final List<Uri> uris) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final JSONArray results = new JSONArray();
+                for (Uri uri : uris) {
+                    try {
+                        results.put(uploadOneImage(uri));
+                    } catch (Exception e) {
+                        try {
+                            JSONObject err = new JSONObject();
+                            err.put("error", String.valueOf(e.getMessage()));
+                            results.put(err);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            webView.evaluateJavascript(
+                                    "window.__aionUploadResult(" + results.toString() + ")",
+                                    null);
+                        } catch (Exception e) {
+                            Toast.makeText(MainActivity.this,
+                                    "\u4e0a\u4f20\u56de\u8c03\u5931\u8d25",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                });
+            }
+        }).start();
+    }
+
     private InputStream openStream(String url) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
         conn.setConnectTimeout(15000);
@@ -753,6 +888,26 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_PICK_IMAGES) {
+            if (resultCode == RESULT_OK && data != null) {
+                final List<Uri> uris = new ArrayList<Uri>();
+                if (data.getClipData() != null) {
+                    int count = data.getClipData().getItemCount();
+                    for (int i = 0; i < count; i++) {
+                        Uri u = data.getClipData().getItemAt(i).getUri();
+                        if (u != null) {
+                            uris.add(u);
+                        }
+                    }
+                } else if (data.getData() != null) {
+                    uris.add(data.getData());
+                }
+                if (!uris.isEmpty()) {
+                    uploadImagesAsync(uris);
+                }
+            }
+            return;
+        }
         if (requestCode == REQ_FILE_CHOOSER && uploadCallback != null) {
             uploadCallback.onReceiveValue(
                     WebChromeClient.FileChooserParams.parseResult(resultCode, data));
