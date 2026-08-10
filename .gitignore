@@ -43,3 +43,11 @@ Thumbs.db
 
 # ===== 临时构建/补丁脚本 =====
 .tmp_build/
+
+# ===== personal learning docs (privacy, keep local only) =====
+docs/素材池.md
+docs/ai-learning-plan.md
+docs/learning_map.md
+docs/reviewer-mode.md
+docs/strategy-notes.md
+docs/study-loop-audit.md
