@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import mimetypes
 import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
-
-import requests
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,51 @@ def _safe_payload(payload: dict) -> dict:
         for key, value in payload.items()
     }
 
+def _http_request(
+    url: str,
+    headers: Optional[dict] = None,
+    payload: Optional[dict] = None,
+    timeout: int = _REQUEST_TIMEOUT,
+) -> tuple:
+    """标准库 HTTP 请求（无 requests 依赖，兼容 Android Chaquopy 打包）
+
+    Returns: (status_code, response_text)；HTTP 错误返回状态码与响应体，
+    网络错误（超时/连接失败）抛 AgnesError。
+    """
+    req_headers = dict(headers or {})
+    body = None
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/json")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers=req_headers,
+        method="POST" if payload is not None else "GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            raw = resp.read()
+            return resp.status, raw.decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        raw = b""
+        try:
+            raw = e.read()
+        except Exception:  # noqa: BLE001
+            pass
+        return e.code, raw.decode("utf-8", errors="replace")
+    except urllib.error.URLError as e:
+        raise AgnesError(f"Agnes 网络请求失败: {e.reason}") from e
+
+
+def _json_or_empty(text: str) -> dict:
+    """解析 JSON 响应体，解析失败返回空 dict（与 requests.json 语义对齐）"""
+    try:
+        data = json.loads(text or "{}")
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
 
 class AgnesError(Exception):
     """Agnes API 调用失败（配置缺失 / HTTP 错误 / 业务错误）"""
@@ -182,17 +228,15 @@ def generate_image(
         if resolved:
             payload["extra_body"]["image"] = resolved
     logger.info("Agnes 图片生成 payload: %s", _safe_payload(payload))
-    resp = requests.post(
+    status, text = _http_request(
         f"{_base_url()}/images/generations",
         headers=headers,
-        json=payload,
+        payload=payload,
         timeout=_REQUEST_TIMEOUT,
     )
-    if resp.status_code != 200:
-        raise AgnesError(
-            f"Agnes 图片生成失败 HTTP {resp.status_code}: {resp.text[:300]}"
-        )
-    data = resp.json()
+    if status != 200:
+        raise AgnesError(f"Agnes 图片生成失败 HTTP {status}: {text[:300]}")
+    data = _json_or_empty(text)
     if "error" in data:
         raise AgnesError(f"Agnes 返回错误: {data['error']}")
     url = (data.get("data") or [{}])[0].get("url", "")
@@ -234,17 +278,15 @@ def submit_video(
             ]
         }
     logger.info("Agnes 视频生成 payload: %s", _safe_payload(payload))
-    resp = requests.post(
+    status, text = _http_request(
         f"{_base_url()}/videos",
         headers=headers,
-        json=payload,
+        payload=payload,
         timeout=_REQUEST_TIMEOUT,
     )
-    if resp.status_code != 200:
-        raise AgnesError(
-            f"Agnes 视频提交失败 HTTP {resp.status_code}: {resp.text[:300]}"
-        )
-    data = resp.json()
+    if status != 200:
+        raise AgnesError(f"Agnes 视频提交失败 HTTP {status}: {text[:300]}")
+    data = _json_or_empty(text)
     task_id = data.get("task_id") or data.get("id")
     video_id = data.get("video_id")
     if not task_id or not video_id:
@@ -256,9 +298,7 @@ def get_video_status(video_id: str) -> dict:
     """按 video_id 查询视频生成状态（正确端点：/agnesapi?video_id=...）"""
     headers = {"Authorization": f"Bearer {_api_key()}"}
     url = f"{_status_base_url()}/agnesapi?video_id={video_id}"
-    resp = requests.get(url, headers=headers, timeout=_REQUEST_TIMEOUT)
-    if resp.status_code != 200:
-        raise AgnesError(
-            f"Agnes 视频状态查询失败 HTTP {resp.status_code}: {resp.text[:300]}"
-        )
-    return resp.json()
+    status, text = _http_request(url, headers=headers, timeout=_REQUEST_TIMEOUT)
+    if status != 200:
+        raise AgnesError(f"Agnes 视频状态查询失败 HTTP {status}: {text[:300]}")
+    return _json_or_empty(text)

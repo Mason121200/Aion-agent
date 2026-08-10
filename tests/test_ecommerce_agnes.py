@@ -13,27 +13,17 @@ from aion_agent.tools import ToolRegistry  # noqa: E402
 
 # ---------------- 客户端：图片 ----------------
 
-def _fake_resp(status_code=200, json_data=None):
-    class Resp:
-        def __init__(self):
-            self.status_code = status_code
-            self.text = "mock"
-        def json(self):
-            return json_data if json_data is not None else {}
-    return Resp()
-
-
 def test_generate_image_success(monkeypatch):
     monkeypatch.setenv("AGNES_API_KEY", "test_key")
     captured = {}
 
-    def fake_post(url, headers, json, timeout):
+    def fake_http(url, headers=None, payload=None, timeout=None):
         captured["url"] = url
-        captured["payload"] = json
-        captured["headers"] = headers
-        return _fake_resp(200, {"data": [{"url": "https://img.example/a.png"}]})
+        captured["payload"] = payload
+        captured["headers"] = headers or {}
+        return 200, '{"data": [{"url": "https://img.example/a.png"}]}'
 
-    monkeypatch.setattr(agnes_client.requests, "post", fake_post)
+    monkeypatch.setattr(agnes_client, "_http_request", fake_http)
     url = agnes_client.generate_image("白色保温杯", size="1024x768")
     assert url == "https://img.example/a.png"
     assert captured["url"] == "https://apihub.agnes-ai.com/v1/images/generations"
@@ -46,11 +36,11 @@ def test_generate_image_with_ref_images(monkeypatch):
     monkeypatch.setenv("AGNES_API_KEY", "test_key")
     captured = {}
 
-    def fake_post(url, headers, json, timeout):
-        captured["payload"] = json
-        return _fake_resp(200, {"data": [{"url": "u"}]})
+    def fake_http(url, headers=None, payload=None, timeout=None):
+        captured["payload"] = payload
+        return 200, '{"data": [{"url": "u"}]}'
 
-    monkeypatch.setattr(agnes_client.requests, "post", fake_post)
+    monkeypatch.setattr(agnes_client, "_http_request", fake_http)
     agnes_client.generate_image("换白色背景", ref_images=["https://x/1.jpg"])
     assert captured["payload"]["extra_body"]["image"] == ["https://x/1.jpg"]
 
@@ -64,8 +54,10 @@ def test_generate_image_missing_key(monkeypatch):
 def test_generate_image_http_error(monkeypatch):
     monkeypatch.setenv("AGNES_API_KEY", "test_key")
     monkeypatch.setattr(
-        agnes_client.requests, "post",
-        lambda *a, **k: _fake_resp(401, {"error": "unauthorized"}),
+        agnes_client, "_http_request",
+        lambda url, headers=None, payload=None, timeout=None: (
+            401, '{"error": "unauthorized"}'
+        ),
     )
     with pytest.raises(agnes_client.AgnesError, match="401"):
         agnes_client.generate_image("x")
@@ -74,8 +66,10 @@ def test_generate_image_http_error(monkeypatch):
 def test_generate_image_business_error(monkeypatch):
     monkeypatch.setenv("AGNES_API_KEY", "test_key")
     monkeypatch.setattr(
-        agnes_client.requests, "post",
-        lambda *a, **k: _fake_resp(200, {"error": {"message": "模型不存在"}}),
+        agnes_client, "_http_request",
+        lambda url, headers=None, payload=None, timeout=None: (
+            200, '{"error": {"message": "模型不存在"}}'
+        ),
     )
     with pytest.raises(agnes_client.AgnesError, match="模型不存在"):
         agnes_client.generate_image("x")
@@ -87,12 +81,12 @@ def test_submit_video(monkeypatch):
     monkeypatch.setenv("AGNES_API_KEY", "test_key")
     captured = {}
 
-    def fake_post(url, headers, json, timeout):
+    def fake_http(url, headers=None, payload=None, timeout=None):
         captured["url"] = url
-        captured["payload"] = json
-        return _fake_resp(200, {"task_id": "t1", "video_id": "v1"})
+        captured["payload"] = payload
+        return 200, '{"task_id": "t1", "video_id": "v1"}'
 
-    monkeypatch.setattr(agnes_client.requests, "post", fake_post)
+    monkeypatch.setattr(agnes_client, "_http_request", fake_http)
     result = agnes_client.submit_video("360 度展示", image_urls=["https://x/1.jpg"])
     assert result == {"task_id": "t1", "video_id": "v1"}
     assert captured["url"].endswith("/videos")
@@ -103,11 +97,11 @@ def test_get_video_status(monkeypatch):
     monkeypatch.setenv("AGNES_API_KEY", "test_key")
     captured = {}
 
-    def fake_get(url, headers, timeout):
+    def fake_http(url, headers=None, payload=None, timeout=None):
         captured["url"] = url
-        return _fake_resp(200, {"status": "completed", "url": "https://v/mp4"})
+        return 200, '{"status": "completed", "url": "https://v/mp4"}'
 
-    monkeypatch.setattr(agnes_client.requests, "get", fake_get)
+    monkeypatch.setattr(agnes_client, "_http_request", fake_http)
     result = agnes_client.get_video_status("v1")
     assert result["status"] == "completed"
     assert captured["url"] == "https://apihub.agnes-ai.com/agnesapi?video_id=v1"
@@ -166,11 +160,11 @@ def test_generate_image_converts_local_ref_to_data_uri(monkeypatch, tmp_path):
     monkeypatch.setenv("AION_DATA_DIR", str(tmp_path))
     captured = {}
 
-    def fake_post(url, headers, json, timeout):
-        captured["payload"] = json
-        return _fake_resp(200, {"data": [{"url": "u"}]})
+    def fake_http(url, headers=None, payload=None, timeout=None):
+        captured["payload"] = payload
+        return 200, '{"data": [{"url": "u"}]}'
 
-    monkeypatch.setattr(agnes_client.requests, "post", fake_post)
+    monkeypatch.setattr(agnes_client, "_http_request", fake_http)
     agnes_client.generate_image("换白色背景", ref_images=["/uploads/a.png"])
     expected = "data:image/png;base64," + base64.b64encode(_TINY_PNG).decode("ascii")
     assert captured["payload"]["extra_body"]["image"] == [expected]
