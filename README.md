@@ -126,6 +126,30 @@ python -m pytest tests -q
 
 协议规范见 `docs/sync-protocol.md`（数据模型、传输端点、合并规则、对接端实现清单）。
 
+## MCP Server（记忆层开放）
+
+记忆层已通过 MCP 暴露为生态标准工具，任何 MCP 客户端（Claude Code / Cursor / Codex）都能读写同一份本地记忆：
+
+- **零依赖 stdio 实现**（`aion_agent/mcp_server.py`），无需安装 mcp SDK，纯标准库；
+- **6 个工具**：`recall_context` / `search_cognition` / `remember` / `search_notes` / `get_active_states` / `memory_stats`；
+- **资源**：`memory://cognitive`、`memory://notes`（全量导出，数据主权兑现）。
+
+```bash
+python -m aion_agent.mcp_server        # stdio MCP server
+aion mcp [--data-dir PATH]
+```
+
+## 记忆基准测试
+
+`aion benchmark` 可量化记忆层质量：检索命中率（recall@k）、精确/语义去重、注入 token 节省、读写延迟。全部在临时数据目录运行，不污染真实数据。
+
+```bash
+python -m aion_agent.benchmark
+# 示例（离线 HashEmbedder）：recall@1=1.0 · 精确去重 5→1 · 语义去重 9→6 · 注入节省 60% · 检索 0.13ms
+```
+
+协议与对接示例见 `docs/mcp-server.md`。
+
 ## ReAct 循环层（Think → Act → Observe → Reflect）
 
 `use_cases/react/react_loop.py` 移植自 zero_code 的 `ReActLoop`（MVP 简化版）：

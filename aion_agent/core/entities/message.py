@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 
 @dataclass
@@ -24,6 +24,7 @@ class Message:
     content: str
     reasoning: Optional[str] = None
     tool_call_id: Optional[str] = None
+    images: List[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
 
     def is_user(self) -> bool:

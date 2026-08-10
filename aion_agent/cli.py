@@ -490,6 +490,21 @@ def main(argv=None) -> int:
     )
     app_p.add_argument("--port", type=int, default=8000, help="本地服务端口")
 
+    mcp_p = sub.add_parser(
+        "mcp", help="启动 MCP Server（stdio，记忆层暴露给任何 MCP 客户端）"
+    )
+    mcp_p.add_argument(
+        "--data-dir",
+        help="数据目录（默认 $AION_DATA_DIR/server 或 ~/.aion_agent/server）",
+    )
+
+    bench_p = sub.add_parser(
+        "benchmark", help="记忆层基准测试（检索命中率/去重/注入节省/延迟）"
+    )
+    bench_p.add_argument(
+        "--data-dir", help="数据目录（默认使用临时目录，不污染真实数据）"
+    )
+
     args = parser.parse_args(argv)
 
     if args.command == "chat":
@@ -503,6 +518,16 @@ def main(argv=None) -> int:
         return cmd_serve(args)
     if args.command == "app":
         return cmd_app(args)
+    if args.command == "mcp":
+        from aion_agent.mcp_server import main as mcp_main
+
+        mcp_argv = ["--data-dir", args.data_dir] if args.data_dir else []
+        return mcp_main(mcp_argv)
+    if args.command == "benchmark":
+        from aion_agent.benchmark import main as bench_main
+
+        bench_argv = ["--data-dir", args.data_dir] if args.data_dir else []
+        return bench_main(bench_argv)
 
     return _run_interactive_menu()
 

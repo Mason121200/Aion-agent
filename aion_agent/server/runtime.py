@@ -152,6 +152,53 @@ class AppRuntime:
             )
         return self._llm
 
+    def save_llm_config(
+        self, *, api_key: str, base_url: str = "", model: str = "",
+    ) -> dict:
+        """把 LLM 配置持久化到 ~/.aion_agent/.env 并立即生效（重启不丢失）"""
+        env_path = Path.home() / ".aion_agent" / ".env"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if env_path.exists():
+            try:
+                lines = env_path.read_text(encoding="utf-8").splitlines()
+            except Exception:  # noqa: BLE001
+                lines = []
+
+        def upsert(key: str, value: str) -> None:
+            nonlocal lines
+            kept = []
+            found = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith(key + "="):
+                    if value:
+                        kept.append(f"{key}={value}")
+                        found = True
+                    continue
+                kept.append(line)
+            if value and not found:
+                kept.append(f"{key}={value}")
+            lines = kept
+
+        upsert("AION_LLM_API_KEY", str(api_key or "").strip())
+        upsert("AION_LLM_BASE_URL", str(base_url or "").strip())
+        upsert("AION_LLM_MODEL", str(model or "").strip())
+        try:
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            logger.exception("写入 LLM 配置失败")
+            raise RuntimeError("写入 LLM 配置失败（~/.aion_agent/.env 不可写）")
+        # 立即生效：直接覆盖 os.environ（load_env_from_dotenv 只在未设置时写入）
+        if str(api_key or "").strip():
+            os.environ["AION_LLM_API_KEY"] = str(api_key).strip()
+        if str(base_url or "").strip():
+            os.environ["AION_LLM_BASE_URL"] = str(base_url).strip()
+        if str(model or "").strip():
+            os.environ["AION_LLM_MODEL"] = str(model).strip()
+        self.reset_llm()
+        return self.llm_status()
+
     def reset_llm(self) -> None:
         """清空已缓存的 LLM 实例（修改 API Key 后重新加载）"""
         self._llm = None
@@ -191,7 +238,18 @@ class AppRuntime:
     # ---------- 会话 ----------
 
     def get_session(self, session_id: str) -> Optional[ReActChatSession]:
-        return self._sessions.get(session_id)
+        session = self._sessions.get(session_id)
+        if session is not None:
+            return session
+        # 重启后内存注册表为空：从持久化仓库恢复历史会话
+        if self._chat_repo.has_session(session_id):
+            try:
+                return self.create_session(
+                    self._chat_repo.session_user_id(session_id), session_id
+                )
+            except ConfigError:
+                return None
+        return None
 
     def create_session(
         self, user_id: str, session_id: Optional[str] = None
@@ -212,6 +270,9 @@ class AppRuntime:
             },
             user_id=user_id,
             session_id=session_id,
+            tool_timeout_seconds=int(
+                os.environ.get("AION_TOOL_TIMEOUT_SECONDS", "120")
+            ),
         )
         self._chat_repo.ensure_session(session.session_id, user_id)
         self._sessions[session.session_id] = session
@@ -319,8 +380,11 @@ class AppRuntime:
 
     # ---------- 提醒通知 ----------
 
-    def _watch_reminders(self, interval: float = 15.0) -> None:
-        """后台定时检查到期提醒，放入待通知队列（幂等，重启不重复）"""
+    def _watch_reminders(
+        self, interval: float = 15.0, adjust_interval: float = 60.0,
+    ) -> None:
+        """后台定时检查：到期提醒触发 + 调整实验到期自动结算（均幂等，重启不重复）"""
+        next_adjust_check = 0.0
         while True:
             try:
                 fired = self._study_repo.fire_due_reminders()
@@ -329,9 +393,60 @@ class AppRuntime:
                         self._pending_notifications.extend(fired)
                         # 队列上限，防止长时间未打开 UI 时堆积
                         self._pending_notifications = self._pending_notifications[-50:]
+                now_t = time.monotonic()
+                if now_t >= next_adjust_check:
+                    next_adjust_check = now_t + adjust_interval
+                    self._settle_adjustments()
             except Exception:  # noqa: BLE001
-                logger.exception("提醒检查失败")
+                logger.exception("后台定时检查失败")
             time.sleep(interval)
+
+    def _settle_adjustments(self) -> None:
+        """调整实验到期结算：只生成对比报告并通知（待 LLM 裁决），不自动沉淀"""
+        settled = self._study_repo.settle_due_adjustments()
+        if not settled:
+            return
+        with self._notification_lock:
+            for adj in settled:
+                self._pending_notifications.append(
+                    self._adjustment_notification(adj)
+                )
+            self._pending_notifications = self._pending_notifications[-50:]
+
+    @staticmethod
+    def _adjustment_notification(adj: dict) -> dict:
+        """结算通知：带唯一 reminder_id 供 UI 去重展示
+
+        规则层只出对比报告，不裁决；裁决由 LLM 在下一次对话中通过
+        confirm_adjustment 完成（采纳 → 沉淀为有效方法）。
+        """
+        plan_title = str(adj.get("plan_title") or "")
+        content = str(adj.get("content") or "")[:80]
+        if adj.get("conclusion") == "pending_review":
+            report = adj.get("report") or {}
+            metrics = report.get("metrics") or []
+            summary = "；".join(
+                f"{m.get('label')} {m.get('before')}→{m.get('after')}"
+                for m in metrics if m.get("improved") is not None
+            ) or "数据不足"
+            verdict = f"对比报告已生成（{summary}），待你在对话中裁决是否采纳"
+            title = "调整实验待裁决"
+        elif adj.get("conclusion") == "effective":
+            verdict = "已裁决为有效，方法已沉淀为你的有效学习方法"
+            title = "调整实验已裁决"
+        else:
+            verdict = "已裁决为无效，结论已记录"
+            title = "调整实验已裁决"
+        return {
+            "reminder_id": "adj_settled_" + str(adj.get("adjustment_id") or ""),
+            "title": title,
+            "content": f"计划《{plan_title}》{verdict}｜调整：{content}",
+            "type": "adjustment_settled",
+            "plan_id": adj.get("plan_id"),
+            "adjustment_id": adj.get("adjustment_id"),
+            "conclusion": adj.get("conclusion"),
+            "settled_at": adj.get("evaluated_at"),
+        }
 
     def pending_notifications(self) -> List[dict]:
         with self._notification_lock:

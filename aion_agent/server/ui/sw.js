@@ -1,5 +1,5 @@
 /* Aion Agent Service Worker —— 离线壳缓存 */
-const CACHE = "aion-v1";
+const CACHE = "aion-v4";
 const ASSETS = [
   "/",
   "/static/style.css",

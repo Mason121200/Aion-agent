@@ -191,6 +191,33 @@ class LocalHandler(BaseHTTPRequestHandler):
                     "session_id": session.session_id,
                     "user_id": user_id,
                 })
+            elif path.startswith("/api/session/") and path.endswith("/meta"):
+                session_id = path[len("/api/session/"):-len("/meta")]
+                title = body.get("title")
+                pinned = body.get("pinned")
+                if title is None and pinned is None:
+                    raise ConfigError("缺少参数 title / pinned")
+                meta = rt.repo_chat.update_session_meta(
+                    session_id, title=title, pinned=pinned
+                )
+                if meta is None:
+                    self._send_error_json(404, f"未找到会话 {session_id}")
+                    return
+                self._send_json(200, meta)
+            elif path == "/api/config/llm":
+                api_key = str(body.get("api_key") or "").strip()
+                if not api_key:
+                    raise ConfigError("api_key 不能为空")
+                try:
+                    status = rt.save_llm_config(
+                        api_key=api_key,
+                        base_url=str(body.get("base_url") or "").strip(),
+                        model=str(body.get("model") or "").strip(),
+                    )
+                except RuntimeError as e:
+                    self._send_error_json(500, str(e))
+                    return
+                self._send_json(200, {"saved": True, "llm": status})
             elif path == "/api/chat":
                 self._stream_chat(body)
             elif path == "/api/study/complete_reminder":

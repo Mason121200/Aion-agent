@@ -48,6 +48,33 @@ class TestJsonChatRepo:
         assert len(history) == 1
         assert history[0].content == "记住我"
 
+    def test_images_passthrough(self):
+        repo = JsonChatRepo()
+        sid = run(repo.create_session("u1"))
+        run(repo.save_message(Message(
+            session_id=sid, role="user", content="看图",
+            images=["/uploads/a.png"],
+        )))
+        run(repo.save_message(Message(
+            session_id=sid, role="assistant", content="生成好了",
+            images=["https://img.example/gen.png"],
+        )))
+        history = run(repo.get_history(sid))
+        assert history[0].images == ["/uploads/a.png"]
+        assert history[1].images == ["https://img.example/gen.png"]
+
+    def test_images_persist_across_instances(self, tmp_path):
+        path = str(tmp_path / "chat")
+        repo1 = JsonChatRepo(persist_dir=path)
+        sid = run(repo1.create_session("u1"))
+        run(repo1.save_message(Message(
+            session_id=sid, role="user", content="x",
+            images=["/uploads/b.png"],
+        )))
+        repo2 = JsonChatRepo(persist_dir=path)
+        history = run(repo2.get_history(sid))
+        assert history[0].images == ["/uploads/b.png"]
+
     def test_list_and_delete(self):
         repo = JsonChatRepo()
         sid = run(repo.create_session("u1"))

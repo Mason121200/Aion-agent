@@ -114,7 +114,7 @@ def test_default_catalog_builds_with_repos():
         user_id="u1",
     )
     names = [s.name for s in skills]
-    assert names == ["builtin", "cognition", "planner", "study"]
+    assert names == ["builtin", "cognition", "planner", "study", "ecommerce"]
 
     tool_registry = ToolRegistry()
     for s in skills:
@@ -123,9 +123,10 @@ def test_default_catalog_builds_with_repos():
     assert tool_registry.is_registered("search_cognition")
     assert tool_registry.is_registered("task_create")
     assert tool_registry.is_registered("plan_create")
+    assert tool_registry.is_registered("generate_product_image")
 
 
 def test_default_catalog_skips_missing_repos():
     skills = build_default_skills(cognitive_repo=None, study_repo=None, planner_repo=None)
     names = [s.name for s in skills]
-    assert names == ["builtin", "cognition"]
+    assert names == ["builtin", "cognition", "ecommerce"]

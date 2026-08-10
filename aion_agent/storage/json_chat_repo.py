@@ -81,6 +81,8 @@ class JsonChatRepo(IChatRepo):
         self._sessions[session_id] = {
             "user_id": user_id,
             "created_at": _to_iso(datetime.now()),
+            "title": "",
+            "pinned": False,
             "messages": [],
         }
         self._save()
@@ -92,9 +94,22 @@ class JsonChatRepo(IChatRepo):
             self._sessions[session_id] = {
                 "user_id": user_id,
                 "created_at": _to_iso(datetime.now()),
+                "title": "",
+                "pinned": False,
                 "messages": [],
             }
             self._save()
+
+    def has_session(self, session_id: str) -> bool:
+        """会话是否存在于持久化仓库（含磁盘恢复后的内存态）"""
+        return session_id in self._sessions
+
+    def session_user_id(self, session_id: str) -> str:
+        """返回会话归属的 user_id，缺失时回退 chat_user"""
+        session = self._sessions.get(session_id)
+        if not session:
+            return "chat_user"
+        return str(session.get("user_id") or "chat_user")
 
     async def save_message(self, message: Message) -> str:
         sid = message.session_id
@@ -102,8 +117,14 @@ class JsonChatRepo(IChatRepo):
             self._sessions[sid] = {
                 "user_id": "unknown",
                 "created_at": _to_iso(datetime.now()),
+                "title": "",
+                "pinned": False,
                 "messages": [],
             }
+        session = self._sessions[sid]
+        if message.role == "user" and not (session.get("title") or "").strip():
+            title = " ".join(str(message.content or "").split())
+            session["title"] = title[:20]
         msg_id = f"msg_{uuid.uuid4().hex[:8]}"
         self._sessions[sid]["messages"].append({
             "id": msg_id,
@@ -112,6 +133,7 @@ class JsonChatRepo(IChatRepo):
             "content": message.content,
             "reasoning": message.reasoning,
             "tool_call_id": message.tool_call_id,
+            "images": [str(u) for u in (message.images or [])],
             "created_at": _to_iso(message.created_at),
         })
         self._save()
@@ -135,6 +157,7 @@ class JsonChatRepo(IChatRepo):
                     content=m.get("content", ""),
                     reasoning=m.get("reasoning"),
                     tool_call_id=m.get("tool_call_id"),
+                    images=[str(u) for u in (m.get("images") or [])],
                     created_at=_parse_dt(m.get("created_at")) or datetime.now(),
                 ))
             except Exception:
@@ -155,11 +178,41 @@ class JsonChatRepo(IChatRepo):
                 "session_id": sid,
                 "user_id": user_id,
                 "created_at": session.get("created_at"),
+                "title": session.get("title") or "",
+                "pinned": bool(session.get("pinned")),
                 "message_count": len(messages),
                 "preview": preview,
             })
-        out.sort(key=lambda s: s.get("created_at") or "", reverse=True)
+        out.sort(
+            key=lambda s: (not bool(s.get("pinned")), s.get("created_at") or ""),
+        )
         return out
+
+    def update_session_meta(
+        self, session_id: str, title: Optional[str] = None,
+        pinned: Optional[bool] = None,
+    ) -> Optional[dict]:
+        """更新会话元信息：标题 / 置顶（供会话管理 UI 使用）"""
+        session = self._sessions.get(session_id)
+        if session is None:
+            return None
+        changed = False
+        if title is not None:
+            new_title = " ".join(str(title).strip().split())[:40]
+            if session.get("title") != new_title:
+                session["title"] = new_title
+                changed = True
+        if pinned is not None:
+            if bool(session.get("pinned")) != bool(pinned):
+                session["pinned"] = bool(pinned)
+                changed = True
+        if changed:
+            self._save()
+        return {
+            "session_id": session_id,
+            "title": session.get("title") or "",
+            "pinned": bool(session.get("pinned")),
+        }
 
     async def delete_session(self, session_id: str) -> bool:
         existed = session_id in self._sessions

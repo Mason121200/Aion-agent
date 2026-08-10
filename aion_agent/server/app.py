@@ -19,10 +19,11 @@ import json
 import logging
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Dict, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -110,6 +111,36 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e))
         return {"session_id": session.session_id, "user_id": user_id}
 
+    @app.post("/api/session/{session_id}/meta")
+    async def update_session_meta(session_id: str, body: dict):
+        title = body.get("title")
+        pinned = body.get("pinned")
+        if title is None and pinned is None:
+            raise HTTPException(status_code=400, detail="缺少参数 title / pinned")
+        meta = rt.repo_chat.update_session_meta(
+            session_id, title=title, pinned=pinned
+        )
+        if meta is None:
+            raise HTTPException(status_code=404, detail=f"未找到会话 {session_id}")
+        return meta
+
+    # ---------- LLM 配置（设置页） ----------
+
+    @app.post("/api/config/llm")
+    async def config_llm(body: dict):
+        api_key = str(body.get("api_key") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="api_key 不能为空")
+        try:
+            status = rt.save_llm_config(
+                api_key=api_key,
+                base_url=str(body.get("base_url") or "").strip(),
+                model=str(body.get("model") or "").strip(),
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"saved": True, "llm": status}
+
     # ---------- 对话（SSE） ----------
 
     @app.post("/api/chat")
@@ -119,6 +150,7 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="消息不能为空")
         user_id = str(body.get("user_id") or "chat_user")
         session_id = body.get("session_id") or None
+        images = [str(u).strip() for u in (body.get("images") or []) if str(u).strip()]
         try:
             session = rt.create_session(user_id, session_id)
         except ConfigError as e:
@@ -126,7 +158,7 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
 
         async def event_stream() -> AsyncGenerator[str, None]:
             try:
-                async for event in session.react_stream(message):
+                async for event in session.react_stream(message, images=images):
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except Exception as e:  # noqa: BLE001
                 logger.exception("chat 流式处理失败")
@@ -171,11 +203,30 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
                 {
                     "role": m.role,
                     "content": m.content,
+                    "images": m.images or [],
                     "created_at": _iso(m.created_at),
                 }
                 for m in msgs
             ]
         }
+
+    # ---------- 图片上传 ----------
+
+    @app.post("/api/upload")
+    async def upload_image(file: UploadFile = File(...)):
+        upload_dir = rt.data_dir / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        ext = (Path(file.filename or "").suffix or ".png").lower()
+        if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
+            raise HTTPException(status_code=400, detail=f"不支持的图片格式: {ext}")
+        content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="空文件")
+        if len(content) > 10 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="图片过大（上限 10MB）")
+        name = f"up_{uuid.uuid4().hex[:12]}{ext}"
+        (upload_dir / name).write_bytes(content)
+        return {"url": f"/uploads/{name}", "name": name}
 
     # ---------- 记忆 ----------
 
@@ -238,6 +289,73 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
             plan_id=str(body.get("plan_id") or "") or None,
         )
         return {"session": session, "today_minutes": rt.repo_study.today_minutes()}
+
+    # ---------- 学习中心（闭环 UI API） ----------
+
+    @app.get("/api/study/plans/{plan_id}")
+    async def study_plan_detail(plan_id: str):
+        detail = rt.repo_study.plan_detail(plan_id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail=f"未找到计划 {plan_id}")
+        detail["tests"] = rt.repo_study.list_tests(plan_id=plan_id)
+        detail["mistakes"] = rt.repo_study.list_mistakes(plan_id=plan_id, include_resolved=True)
+        detail["reviews"] = rt.repo_study.list_reviews(plan_id=plan_id, include_done=True)
+        return detail
+
+    @app.get("/api/study/plans/{plan_id}/analysis")
+    async def study_plan_analysis(plan_id: str, days: int = 7):
+        try:
+            return rt.repo_study.analyze(plan_id=plan_id, days=days)
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+    @app.post("/api/study/tests")
+    async def study_test_log(body: dict):
+        plan_id = str(body.get("plan_id") or "").strip()
+        total = int(body.get("total") or 0)
+        if not plan_id or total <= 0:
+            raise HTTPException(status_code=400, detail="缺少参数 plan_id / total（total 需大于 0）")
+        try:
+            test = rt.repo_study.add_test(
+                plan_id=plan_id,
+                title=str(body.get("title") or "").strip(),
+                score=int(body.get("score") or 0),
+                total=total,
+                correct=body.get("correct"),
+                knowledge_points=body.get("knowledge_points") or [],
+                note=str(body.get("note") or "").strip(),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"test": test}
+
+    @app.post("/api/study/mistakes")
+    async def study_mistake_add(body: dict):
+        plan_id = str(body.get("plan_id") or "").strip()
+        content = str(body.get("content") or "").strip()
+        if not plan_id or not content:
+            raise HTTPException(status_code=400, detail="缺少参数 plan_id / content")
+        try:
+            mistake = rt.repo_study.add_mistake(
+                plan_id=plan_id, content=content,
+                reason=str(body.get("reason") or "").strip(),
+                knowledge_point=str(body.get("knowledge_point") or "").strip(),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"mistake": mistake}
+
+    @app.post("/api/study/plans/{plan_id}/reviews/{review_item_id}/checkin")
+    async def study_review_checkin(plan_id: str, review_item_id: str, body: dict):
+        try:
+            item = rt.repo_study.review_checkin(
+                plan_id=plan_id, review_item_id=review_item_id,
+                correct=bool(body.get("correct")),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        due = rt.repo_study.schedule_reviews(plan_id)
+        return {"review_item": item, "due_remaining": len(due)}
 
     # ---------- 静态 UI（PWA） ----------
 
@@ -327,6 +445,9 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
         )
         return {"policy": rt.tool_policy.to_dict()}
 
+    upload_dir = rt.data_dir / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
     app.mount("/static", StaticFiles(directory=_ui_dir()), name="static")
 
     return app
