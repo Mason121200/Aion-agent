@@ -53,6 +53,8 @@ Skill(
 # .env / 环境变量
 AGNES_API_KEY=your_agnes_key      # 与 AI_chat_web 共用同一个 key
 AGNES_BASE_URL=https://apihub.agnes-ai.com/v1   # 可选，默认即此值
+AGNES_IMAGE_MODEL=agnes-image-2.1-flash   # 可选，默认即此值（设置页可改）
+AGNES_VIDEO_MODEL=agnes-video-v2.0        # 可选，默认即此值（设置页可改）
 ```
 
 ## 五、测试

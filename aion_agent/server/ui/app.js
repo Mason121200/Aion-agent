@@ -1030,6 +1030,7 @@ async function loadPlanAnalysis(planId) {
 
 async function renderSettings() {
   const llm = (state.health && state.health.llm) || {};
+  const agnes = (state.health && state.health.agnes) || {};
   let html = `<div class="set-group"><h3>连接与模型</h3>
     <div class="set-row"><span>状态</span><span class="${llm.configured ? "ok-text" : "warn-text"}">${llm.configured ? "已连接 · " + esc(llm.model || "") : "未配置"}</span></div>
     <div class="set-row"><span>接口</span><span class="dim">${esc(llm.base_url || "-")}</span></div>
@@ -1042,6 +1043,19 @@ async function renderSettings() {
     <div class="dim small">配置保存在本机 ~/.aion_agent/.env，重启不丢失；不会上传到任何平台。</div>
   </div>`;
 
+  html += `<div class="set-group"><h3>图片/视频生成（Agnes）</h3>
+    <div class="set-row"><span>状态</span><span class="${agnes.configured ? "ok-text" : "warn-text"}">${agnes.configured ? "已配置" : "未配置"}</span></div>
+    <div class="set-row"><span>图片模型</span><span class="dim">${esc(agnes.image_model || "-")}</span></div>
+    <div class="set-row"><span>视频模型</span><span class="dim">${esc(agnes.video_model || "-")}</span></div>
+    <div class="set-form">
+      <input id="agnes-key" type="password" placeholder="AGNES API Key（已配置可留空）" autocomplete="off">
+      <input id="agnes-url" placeholder="Base URL（默认 apihub.agnes-ai.com/v1）">
+      <input id="agnes-img-model" placeholder="图片模型（默认 agnes-image-2.1-flash）">
+      <input id="agnes-vid-model" placeholder="视频模型（默认 agnes-video-v2.0）">
+      <button class="btn-mini" id="btn-save-agnes">保存并生效</button>
+    </div>
+    <div class="dim small">生图/视频使用独立配置；保存在本机 ~/.aion_agent/.env，重启不丢失。</div>
+  </div>`;
   html += `<div class="set-group"><h3>数据与同步</h3>
     <div id="sync-body" class="set-inner"></div>
   </div>`;
@@ -1077,7 +1091,28 @@ async function renderSettings() {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ api_key: key, base_url: url, model }),
         });
-        state.health = { status: "ok", llm: r.llm };
+        state.health = { status: "ok", llm: r.llm, agnes: (state.health && state.health.agnes) || {} };
+        toast("已保存并生效");
+        renderSettings();
+      } catch (e) {
+        toast("保存失败: " + e.message, 4000);
+      }
+    });
+  }
+  const agnesBtn = document.getElementById("btn-save-agnes");
+  if (agnesBtn) {
+    agnesBtn.addEventListener("click", async () => {
+      const key = document.getElementById("agnes-key").value.trim();
+      if (!key) { toast("请输入 AGNES API Key"); return; }
+      const url = document.getElementById("agnes-url").value.trim();
+      const imgModel = document.getElementById("agnes-img-model").value.trim();
+      const vidModel = document.getElementById("agnes-vid-model").value.trim();
+      try {
+        const r = await api("/api/config/agnes", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ api_key: key, base_url: url, image_model: imgModel, video_model: vidModel }),
+        });
+        state.health = { status: "ok", llm: state.health.llm, agnes: r.agnes };
         toast("已保存并生效");
         renderSettings();
       } catch (e) {

@@ -4,6 +4,8 @@
 配置（环境变量）：
   AGNES_API_KEY   必填，Bearer 鉴权（与 AI_chat_web 共用同一个 key）
   AGNES_BASE_URL  可选，默认 https://apihub.agnes-ai.com/v1
+  AGNES_IMAGE_MODEL 可选，默认 agnes-image-2.1-flash（生图模型，可换）
+  AGNES_VIDEO_MODEL  可选，默认 agnes-video-v2.0（视频模型，可换）
 """
 
 from __future__ import annotations
@@ -23,8 +25,8 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://apihub.agnes-ai.com/v1"
-IMAGE_MODEL = "agnes-image-2.1-flash"
-VIDEO_MODEL = "agnes-video-v2.0"
+DEFAULT_IMAGE_MODEL = "agnes-image-2.1-flash"
+DEFAULT_VIDEO_MODEL = "agnes-video-v2.0"
 _REQUEST_TIMEOUT = 300  # 秒；Agnes 官方建议客户端超时 60-360s（多图生图耗时更长）
 
 
@@ -200,6 +202,16 @@ def _status_base_url() -> str:
     return base[: -len("/v1")] if base.endswith("/v1") else base
 
 
+def _image_model() -> str:
+    """图片生成模型：环境变量 AGNES_IMAGE_MODEL 可覆盖（默认 agnes-image-2.1-flash）"""
+    return os.getenv("AGNES_IMAGE_MODEL", DEFAULT_IMAGE_MODEL).strip() or DEFAULT_IMAGE_MODEL
+
+
+def _video_model() -> str:
+    """视频生成模型：环境变量 AGNES_VIDEO_MODEL 可覆盖（默认 agnes-video-v2.0）"""
+    return os.getenv("AGNES_VIDEO_MODEL", DEFAULT_VIDEO_MODEL).strip() or DEFAULT_VIDEO_MODEL
+
+
 def generate_image(
     prompt: str,
     size: str = "1024x768",
@@ -214,7 +226,7 @@ def generate_image(
         "Content-Type": "application/json",
     }
     payload: Dict = {
-        "model": IMAGE_MODEL,
+        "model": _image_model(),
         "prompt": str(prompt or "").strip(),
         "size": size or "1024x768",
         "extra_body": {"response_format": "url"},
@@ -260,7 +272,7 @@ def submit_video(
         "Content-Type": "application/json",
     }
     payload: Dict = {
-        "model": VIDEO_MODEL,
+        "model": _video_model(),
         "prompt": str(prompt or "").strip(),
         "height": int(height),
         "width": int(width),

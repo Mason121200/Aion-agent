@@ -18,6 +18,11 @@ from typing import Dict, List, Optional
 from aion_agent.core.entities.agent_state import AgentState
 from aion_agent.core.entities.cognitive_triple import CognitiveTriple, Dimension
 from aion_agent.core.entities.note import Note
+from aion_agent.ecommerce.agnes_client import (
+    DEFAULT_BASE_URL as AGNES_DEFAULT_BASE_URL,
+    DEFAULT_IMAGE_MODEL as AGNES_DEFAULT_IMAGE_MODEL,
+    DEFAULT_VIDEO_MODEL as AGNES_DEFAULT_VIDEO_MODEL,
+)
 from aion_agent.llm.embedding import build_embedder
 from aion_agent.llm.openai_compatible import (
     OpenAICompatibleClient,
@@ -212,6 +217,81 @@ class AppRuntime:
             "base_url": cfg.get("base_url"),
             "error": self._llm_error,
         }
+
+    # ---------- Agnes 生图/视频 ----------
+
+    def agnes_status(self) -> dict:
+        self._load_dotenv_files()
+        env_path = self.data_dir / ".env"
+        if env_path.exists():
+            load_env_from_dotenv(env_path)
+        return {
+            "configured": bool(os.getenv("AGNES_API_KEY", "").strip()),
+            "base_url": (
+                os.getenv("AGNES_BASE_URL", "").strip()
+                or AGNES_DEFAULT_BASE_URL
+            ),
+            "image_model": (
+                os.getenv("AGNES_IMAGE_MODEL", "").strip()
+                or AGNES_DEFAULT_IMAGE_MODEL
+            ),
+            "video_model": (
+                os.getenv("AGNES_VIDEO_MODEL", "").strip()
+                or AGNES_DEFAULT_VIDEO_MODEL
+            ),
+        }
+
+    def save_agnes_config(
+        self, *, api_key: str, base_url: str = "",
+        image_model: str = "", video_model: str = "",
+    ) -> dict:
+        """把 Agnes 配置持久化到 ~/.aion_agent/.env 并立即生效（重启不丢失）"""
+        self._load_dotenv_files()
+        env_path = Path.home() / ".aion_agent" / ".env"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if env_path.exists():
+            try:
+                lines = env_path.read_text(encoding="utf-8").splitlines()
+            except Exception:  # noqa: BLE001
+                lines = []
+
+        def upsert(key: str, value: str) -> None:
+            nonlocal lines
+            kept = []
+            found = False
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith(key + "="):
+                    if value:
+                        kept.append(f"{key}={value}")
+                        found = True
+                    continue
+                kept.append(line)
+            if value and not found:
+                kept.append(f"{key}={value}")
+            lines = kept
+
+        entries = (
+            ("AGNES_API_KEY", str(api_key or "").strip()),
+            ("AGNES_BASE_URL", str(base_url or "").strip()),
+            ("AGNES_IMAGE_MODEL", str(image_model or "").strip()),
+            ("AGNES_VIDEO_MODEL", str(video_model or "").strip()),
+        )
+        for key, value in entries:
+            upsert(key, value)
+        try:
+            env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            logger.exception("写入 Agnes 配置失败")
+            raise RuntimeError("写入 Agnes 配置失败（~/.aion_agent/.env 不可写）")
+        # 立即生效：直接覆盖 os.environ（空值 = 清除）
+        for key, value in entries:
+            if value:
+                os.environ[key] = value
+            else:
+                os.environ.pop(key, None)
+        return self.agnes_status()
 
     # ---------- 配置发现 ----------
 

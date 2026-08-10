@@ -2,6 +2,7 @@
 
 实现与 FastAPI 版一致的 API 协议，Web UI（PWA）无需任何改动：
     GET    /api/health                 服务与 LLM 配置状态
+    POST   /api/config/agnes           Agnes 生图/视频配置（key/URL/模型）
     POST   /api/session                创建/复用会话
     POST   /api/chat                   SSE 流式对话（ReAct 循环事件）
     GET    /api/sessions               会话列表
@@ -138,7 +139,7 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/api/health":
-                self._send_json(200, {"status": "ok", "llm": rt.llm_status()})
+                self._send_json(200, {"status": "ok", "llm": rt.llm_status(), "agnes": rt.agnes_status()})
             elif path == "/api/sessions":
                 user_id = q.get("user_id", "chat_user")
                 sessions = self._sync(rt.repo_chat.list_sessions(user_id))
@@ -218,6 +219,21 @@ class LocalHandler(BaseHTTPRequestHandler):
                     self._send_error_json(500, str(e))
                     return
                 self._send_json(200, {"saved": True, "llm": status})
+            elif path == "/api/config/agnes":
+                api_key = str(body.get("api_key") or "").strip()
+                if not api_key:
+                    raise ConfigError("api_key 不能为空")
+                try:
+                    status = rt.save_agnes_config(
+                        api_key=api_key,
+                        base_url=str(body.get("base_url") or "").strip(),
+                        image_model=str(body.get("image_model") or "").strip(),
+                        video_model=str(body.get("video_model") or "").strip(),
+                    )
+                except RuntimeError as e:
+                    self._send_error_json(500, str(e))
+                    return
+                self._send_json(200, {"saved": True, "agnes": status})
             elif path == "/api/chat":
                 self._stream_chat(body)
             elif path == "/api/study/complete_reminder":
@@ -420,4 +436,48 @@ def set_api_key(key: str) -> bool:
     os.environ.pop("LLM_API_KEY", None)
     load_env_from_dotenv(env_path)
     _runtime.reset_llm()
+    return True
+
+
+def set_agnes_config(
+    api_key: str = "",
+    base_url: str = "",
+    image_model: str = "",
+    video_model: str = "",
+) -> bool:
+    """写入 Agnes 配置到数据目录 .env 并立即生效（App 设置页调用）"""
+    if _runtime is None:
+        return False
+    env_path = _runtime.data_dir / ".env"
+    lines = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    def upsert(key: str, value: str) -> None:
+        nonlocal lines
+        kept = []
+        found = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(key + "="):
+                if value:
+                    kept.append(f"{key}={value}")
+                    found = True
+                continue
+            kept.append(line)
+        if value and not found:
+            kept.append(f"{key}={value}")
+        lines = kept
+
+    for key, value in (
+        ("AGNES_API_KEY", str(api_key or "").strip()),
+        ("AGNES_BASE_URL", str(base_url or "").strip()),
+        ("AGNES_IMAGE_MODEL", str(image_model or "").strip()),
+        ("AGNES_VIDEO_MODEL", str(video_model or "").strip()),
+    ):
+        upsert(key, value)
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for key in ("AGNES_API_KEY", "AGNES_BASE_URL", "AGNES_IMAGE_MODEL", "AGNES_VIDEO_MODEL"):
+        os.environ.pop(key, None)
+    load_env_from_dotenv(env_path)
     return True

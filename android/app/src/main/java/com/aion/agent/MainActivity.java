@@ -42,6 +42,10 @@ public class MainActivity extends Activity {
 
     private static final String PREFS = "aion_prefs";
     private static final String KEY_API_KEY = "api_key";
+    private static final String KEY_AGNES_KEY = "agnes_api_key";
+    private static final String KEY_AGNES_URL = "agnes_base_url";
+    private static final String KEY_AGNES_IMAGE_MODEL = "agnes_image_model";
+    private static final String KEY_AGNES_VIDEO_MODEL = "agnes_video_model";
     private static final String KEY_URL = "server_url";
     private static final String LOCAL_URL = "http://127.0.0.1:8000";
 
@@ -245,13 +249,28 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 把 API Key 写入数据目录 .env（Python 启动时自动加载） */
+    /** 把 API Key 写入数据目录 .env（保留已有配置，如 AGNES_*） */
     private void writeEnvFile(String dataDir, String key) {
         try {
             File env = new File(dataDir, ".env");
-            String content = "AION_LLM_API_KEY=" + key.trim() + "\n";
+            StringBuilder sb = new StringBuilder();
+            if (env.exists()) {
+                java.io.BufferedReader reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(
+                                new java.io.FileInputStream(env), StandardCharsets.UTF_8));
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String s = line.trim();
+                    if (s.startsWith("AION_LLM_API_KEY=") || s.startsWith("LLM_API_KEY=")) {
+                        continue;
+                    }
+                    sb.append(line).append("\n");
+                }
+                reader.close();
+            }
+            sb.append("AION_LLM_API_KEY=").append(key.trim()).append("\n");
             FileOutputStream fos = new FileOutputStream(env);
-            fos.write(content.getBytes(StandardCharsets.UTF_8));
+            fos.write(sb.toString().getBytes(StandardCharsets.UTF_8));
             fos.close();
         } catch (Exception ignored) {
         }
@@ -290,6 +309,50 @@ public class MainActivity extends Activity {
         urlInput.setText(prefs.getString(KEY_URL, LOCAL_URL));
         urlInput.setSingleLine(true);
         box.addView(urlInput);
+        TextView agnesLabel = new TextView(this);
+        agnesLabel.setText("AGNES API Key（生图/视频用，可选）");
+        agnesLabel.setTextColor(Color.parseColor("#334155"));
+        box.addView(agnesLabel);
+
+        final EditText agnesKeyInput = new EditText(this);
+        agnesKeyInput.setHint("在 Agnes 平台创建");
+        agnesKeyInput.setText(prefs.getString(KEY_AGNES_KEY, ""));
+        agnesKeyInput.setSingleLine(true);
+        box.addView(agnesKeyInput);
+
+        TextView agnesHint = new TextView(this);
+        agnesHint.setText("不填则无法使用生图/视频；保存在手机本地，重启不丢失。");
+        agnesHint.setTextColor(Color.parseColor("#94a3b8"));
+        agnesHint.setTextSize(12);
+        agnesHint.setPadding(dp(4), dp(2), dp(4), dp(8));
+        box.addView(agnesHint);
+
+        TextView agnesUrlLabel = new TextView(this);
+        agnesUrlLabel.setText("AGNES Base URL（高级，默认即可）");
+        agnesUrlLabel.setTextColor(Color.parseColor("#334155"));
+        box.addView(agnesUrlLabel);
+
+        final EditText agnesUrlInput = new EditText(this);
+        agnesUrlInput.setText(prefs.getString(KEY_AGNES_URL, "https://apihub.agnes-ai.com/v1"));
+        agnesUrlInput.setSingleLine(true);
+        box.addView(agnesUrlInput);
+
+        TextView agnesModelLabel = new TextView(this);
+        agnesModelLabel.setText("图片 / 视频模型（高级，默认即可）");
+        agnesModelLabel.setTextColor(Color.parseColor("#334155"));
+        box.addView(agnesModelLabel);
+
+        final EditText agnesImgInput = new EditText(this);
+        agnesImgInput.setHint("图片模型");
+        agnesImgInput.setText(prefs.getString(KEY_AGNES_IMAGE_MODEL, "agnes-image-2.1-flash"));
+        agnesImgInput.setSingleLine(true);
+        box.addView(agnesImgInput);
+
+        final EditText agnesVidInput = new EditText(this);
+        agnesVidInput.setHint("视频模型");
+        agnesVidInput.setText(prefs.getString(KEY_AGNES_VIDEO_MODEL, "agnes-video-v2.0"));
+        agnesVidInput.setSingleLine(true);
+        box.addView(agnesVidInput);
 
         new AlertDialog.Builder(this)
                 .setTitle("设置")
@@ -302,9 +365,20 @@ public class MainActivity extends Activity {
                         if (url.isEmpty()) {
                             url = LOCAL_URL;
                         }
+                        String agnesKey = agnesKeyInput.getText().toString().trim();
+                        String agnesUrl = agnesUrlInput.getText().toString().trim();
+                        if (agnesUrl.isEmpty()) {
+                            agnesUrl = "https://apihub.agnes-ai.com/v1";
+                        }
+                        String agnesImgModel = agnesImgInput.getText().toString().trim();
+                        String agnesVidModel = agnesVidInput.getText().toString().trim();
                         prefs.edit()
                                 .putString(KEY_API_KEY, key)
                                 .putString(KEY_URL, url)
+                                .putString(KEY_AGNES_KEY, agnesKey)
+                                .putString(KEY_AGNES_URL, agnesUrl)
+                                .putString(KEY_AGNES_IMAGE_MODEL, agnesImgModel)
+                                .putString(KEY_AGNES_VIDEO_MODEL, agnesVidModel)
                                 .apply();
                         // 运行时立即生效：写入 .env 并重置 LLM 缓存（空 key = 清除）
                         try {
@@ -322,6 +396,13 @@ public class MainActivity extends Activity {
                             writeEnvFile(getFilesDir().getAbsolutePath(), key);
                             Toast.makeText(MainActivity.this,
                                     "API Key 已保存（保存在本机）", Toast.LENGTH_SHORT).show();
+                        }
+                        try {
+                            PyObject agnesMod = Python.getInstance()
+                                    .getModule("aion_agent.server.local_server");
+                            agnesMod.callAttr("set_agnes_config", agnesKey,
+                                    agnesUrl, agnesImgModel, agnesVidModel);
+                        } catch (Exception ignored) {
                         }
                         webView.loadUrl(url);
                     }

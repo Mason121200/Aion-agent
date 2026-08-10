@@ -98,7 +98,7 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "llm": rt.llm_status()}
+        return {"status": "ok", "llm": rt.llm_status(), "agnes": rt.agnes_status()}
 
     # ---------- 会话 ----------
 
@@ -140,6 +140,24 @@ def create_app(runtime: Optional[AppRuntime] = None) -> FastAPI:
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
         return {"saved": True, "llm": status}
+
+    # ---------- Agnes 生图/视频配置（设置页） ----------
+
+    @app.post("/api/config/agnes")
+    async def config_agnes(body: dict):
+        api_key = str(body.get("api_key") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="api_key 不能为空")
+        try:
+            status = rt.save_agnes_config(
+                api_key=api_key,
+                base_url=str(body.get("base_url") or "").strip(),
+                image_model=str(body.get("image_model") or "").strip(),
+                video_model=str(body.get("video_model") or "").strip(),
+            )
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"saved": True, "agnes": status}
 
     # ---------- 对话（SSE） ----------
 
