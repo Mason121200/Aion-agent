@@ -51,3 +51,5 @@ docs/learning_map.md
 docs/reviewer-mode.md
 docs/strategy-notes.md
 docs/study-loop-audit.md
+scripts/review_followup.py
+tests/test_review_followup.py
