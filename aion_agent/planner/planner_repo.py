@@ -36,6 +36,37 @@ def _to_iso(value: Optional[datetime]) -> Optional[str]:
     return value.isoformat(timespec="seconds") if value else None
 
 
+# 方案核心字段：锁定（locked）后不可直接修改，调整需走「调整请求 → 用户确认」流程
+_LOCKED_CORE_FIELDS = {
+    "title", "goal", "why", "end_date", "daily_minutes",
+    "plan_text", "acceptance_criteria", "routine",
+}
+
+
+def _normalize_routine(routine) -> Optional[dict]:
+    """规范化重复日程模板：recurrence + blocks（每块含名称/时段/专注/分钟）"""
+    if not routine:
+        return None
+    recurrence = str(routine.get("recurrence") or "daily").strip()
+    if recurrence not in ("daily", "weekly"):
+        recurrence = "daily"
+    blocks = []
+    for b in routine.get("blocks") or []:
+        name = str(b.get("name") or "").strip()
+        if not name:
+            continue
+        blocks.append({
+            "block_id": f"blk_{uuid.uuid4().hex[:8]}",
+            "name": name,
+            "slot": str(b.get("slot") or "").strip(),
+            "focus": str(b.get("focus") or "").strip(),
+            "minutes": max(int(b.get("minutes") or 0), 0),
+        })
+    if not blocks:
+        return None
+    return {"recurrence": recurrence, "blocks": blocks}
+
+
 class JsonPlanRepo:
     """通用长期任务规划仓库（JSON 持久化）"""
 
@@ -88,6 +119,7 @@ class JsonPlanRepo:
         milestones: Optional[List[dict]] = None,
         plan_text: str = "",
         acceptance_criteria: Optional[List[str]] = None,
+        routine: Optional[dict] = None,
     ) -> dict:
         """创建长期任务（同标题活跃任务去重，返回现有计划）"""
         title = str(title or "").strip()
@@ -116,6 +148,7 @@ class JsonPlanRepo:
                 str(a).strip() for a in (acceptance_criteria or [])
                 if str(a).strip()
             ],
+            "routine": _normalize_routine(routine),
             "milestones": [
                 {
                     "milestone_id": f"ms_{uuid.uuid4().hex[:8]}",
@@ -134,6 +167,8 @@ class JsonPlanRepo:
                 if str(m.get("title") or "").strip()
             ],
             "decision_log": [{"ts": _to_iso(_now()), "text": "创建任务"}],
+            "locked": False,
+            "pending_adjustments": [],
             "created_at": _to_iso(_now()),
             "updated_at": _to_iso(_now()),
         }
@@ -194,10 +229,17 @@ class JsonPlanRepo:
         plan = self.get_plan(plan_id)
         if plan is None:
             return None
+        core_changes = [k for k in _LOCKED_CORE_FIELDS if k in fields]
+        if plan.get("locked") and core_changes:
+            raise ValueError(
+                "方案已锁定（locked），不能直接修改："
+                + "、".join(sorted(core_changes))
+                + "。如需调整，请先调用 task_adjust_request 提交调整请求，经用户确认后生效。"
+            )
         allowed = {
             "title", "goal", "why", "end_date", "daily_minutes", "priority",
             "status", "progress", "current_status", "next_steps", "tags",
-            "plan_text", "acceptance_criteria",
+            "plan_text", "acceptance_criteria", "routine",
             # 内部关联字段（由 planner 工具层写入，不暴露给 LLM schema）
             "state_id", "rel_id",
         }
@@ -226,6 +268,8 @@ class JsonPlanRepo:
                     ][:10]
                 elif k == "plan_text":
                     plan[k] = str(v or "").strip()
+                elif k == "routine":
+                    plan[k] = _normalize_routine(v)
                 else:
                     plan[k] = str(v or "").strip()
         if decision and str(decision).strip():
@@ -241,6 +285,10 @@ class JsonPlanRepo:
         plan = self.get_plan(plan_id)
         if plan is None:
             return None
+        if plan.get("locked"):
+            raise ValueError(
+                "方案已锁定，不能新增里程碑；如需调整，请先通过 task_adjust_request 提交调整请求"
+            )
         plan["milestones"].append({
             "milestone_id": f"ms_{uuid.uuid4().hex[:8]}",
             "title": str(title or "").strip() or "新阶段",
@@ -263,6 +311,101 @@ class JsonPlanRepo:
                 plan["updated_at"] = _to_iso(_now())
                 self._save()
                 return plan
+        return None
+
+    # ---------- 方案锁定与调整裁决 ----------
+
+    def lock_plan(self, plan_id: str) -> Optional[dict]:
+        """确认方案并锁定：锁定后核心字段不可直接修改"""
+        plan = self.get_plan(plan_id)
+        if plan is None:
+            return None
+        plan["locked"] = True
+        plan["locked_at"] = _to_iso(_now())
+        plan["updated_at"] = _to_iso(_now())
+        self._save()
+        return plan
+
+    def create_adjustment_request(
+        self, plan_id: str, *, reason: str, **proposed
+    ) -> Optional[dict]:
+        """锁定方案下的调整请求：规则层只记录待裁决，由用户确认后才应用"""
+        plan = self.get_plan(plan_id)
+        if plan is None:
+            return None
+        reason = str(reason or "").strip()
+        if not reason:
+            raise ValueError("缺少参数 reason（调整原因）")
+        proposed = {
+            k: v for k, v in proposed.items()
+            if k in _LOCKED_CORE_FIELDS and v is not None
+        }
+        if not proposed:
+            raise ValueError(
+                "调整请求必须包含至少一个核心字段变更："
+                + "、".join(sorted(_LOCKED_CORE_FIELDS))
+            )
+        adjustments = plan.setdefault("pending_adjustments", [])
+        adjustment = {
+            "adjustment_id": f"adj_{uuid.uuid4().hex[:8]}",
+            "reason": reason,
+            "proposed": proposed,
+            "status": "pending",
+            "created_at": _to_iso(_now()),
+            "resolved_at": None,
+            "decision": None,
+        }
+        adjustments.append(adjustment)
+        plan["updated_at"] = _to_iso(_now())
+        self._save()
+        return {"adjustment": adjustment, "plan": plan}
+
+    def confirm_adjustment(
+        self,
+        plan_id: str,
+        adjustment_id: str,
+        *,
+        accepted: bool,
+        decision: str = "",
+    ) -> Optional[dict]:
+        """用户裁决调整请求：accepted=True 时应用 proposed 字段并记入决策日志"""
+        plan = self.get_plan(plan_id)
+        if plan is None:
+            return None
+        for adjustment in plan.get("pending_adjustments") or []:
+            if adjustment.get("adjustment_id") != adjustment_id:
+                continue
+            if adjustment.get("status") != "pending":
+                return {"adjustment": adjustment, "plan": plan, "already_resolved": True}
+            adjustment["status"] = "accepted" if accepted else "rejected"
+            adjustment["resolved_at"] = _to_iso(_now())
+            adjustment["decision"] = str(decision or "").strip()
+            if accepted:
+                for k, v in (adjustment.get("proposed") or {}).items():
+                    if k == "routine":
+                        plan[k] = _normalize_routine(v)
+                    elif k == "acceptance_criteria":
+                        plan[k] = [
+                            str(x).strip() for x in (v or [])
+                            if str(x).strip()
+                        ][:10]
+                    elif k == "end_date":
+                        plan[k] = _to_iso(_parse_dt(v))
+                    elif k == "daily_minutes":
+                        plan[k] = max(int(v or 0), 0)
+                    else:
+                        plan[k] = str(v or "").strip()
+                plan["decision_log"].append({
+                    "ts": _to_iso(_now()),
+                    "text": (
+                        f"调整已确认（{adjustment['adjustment_id']}）："
+                        f"{adjustment['reason']}"
+                        + (f"——{adjustment['decision']}" if adjustment["decision"] else "")
+                    ),
+                })
+            plan["updated_at"] = _to_iso(_now())
+            self._save()
+            return {"adjustment": adjustment, "plan": plan, "already_resolved": False}
         return None
 
     def archive_plan(self, plan_id: str) -> Optional[dict]:

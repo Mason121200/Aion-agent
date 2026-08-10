@@ -3,6 +3,7 @@
 参考 study_tools 的「长期计划笔记体系」范式，但不绑定学习场景：
 - task_create / task_list / task_read / task_update / task_checkin / task_archive
 - task_milestone / task_complete_milestone（里程碑管理）
+- task_lock / task_adjust_request / task_adjust_confirm（方案锁定与调整裁决）
 - 「活跃任务」只保留最新状态，决策记录只追加（进度追溯）
 - 任务创建 / 检视时同步写入认知仓库（state + 笔记），让任务进入长期记忆
 
@@ -152,6 +153,7 @@ def _make_handlers(
             daily_minutes=int(args.get("daily_minutes") or 0),
             priority=str(args.get("priority") or "normal").strip(),
             milestones=args.get("milestones") or [],
+            routine=args.get("routine"),
             plan_text=str(args.get("plan_text") or "").strip(),
             acceptance_criteria=args.get("acceptance_criteria"),
         )
@@ -231,6 +233,16 @@ def _make_handlers(
             parts.append("决策记录：" + "；".join(
                 f"{_fmt_dt(d.get('ts'))} {d['text']}" for d in dl[-10:]
             ))
+        if detail.get("locked"):
+            parts.append("🔒 方案已锁定：核心字段需经 task_adjust_request + 用户确认后才能调整")
+        pending = [
+            a for a in (detail.get("pending_adjustments") or [])
+            if a.get("status") == "pending"
+        ]
+        if pending:
+            parts.append("待裁决调整：" + "；".join(
+                f"{a['adjustment_id']} {a['reason']}" for a in pending
+            ))
         return {"content": "\n".join(parts), "plan": detail}
 
     def _task_update(args: Dict[str, Any]) -> dict:
@@ -240,7 +252,7 @@ def _make_handlers(
         fields = {}
         for k in ("title", "goal", "why", "end_date", "daily_minutes", "priority",
                   "status", "progress", "current_status", "next_steps", "tags",
-                  "plan_text", "acceptance_criteria"):
+                  "plan_text", "acceptance_criteria", "routine"):
             if k in args and args.get(k) is not None:
                 fields[k] = args[k]
         plan = repo.update_plan(
@@ -311,6 +323,92 @@ def _make_handlers(
         _sync_task_cognition(plan, release_reason="cancelled")
         return {"content": f"已归档任务：{plan['title']}", "plan": plan}
 
+    # ---------------- 方案锁定与调整裁决 ----------------
+
+    def _task_lock(args: Dict[str, Any]) -> dict:
+        plan_id = str(args.get("plan_id") or "").strip()
+        if not plan_id:
+            raise ValueError("缺少参数 plan_id")
+        plan = repo.lock_plan(plan_id)
+        if plan is None:
+            raise ValueError(f"未找到任务：{plan_id}")
+        _sync_task_cognition(plan, touch=True)
+        return {
+            "content": f"方案已确认并锁定：{plan['title']}。"
+            "锁定后核心字段（目标/截止/时长/方案文本/验收标准/重复日程）不可直接修改，"
+            "需通过 task_adjust_request 提交调整、经用户确认后生效。",
+            "plan": plan,
+        }
+
+    def _task_adjust_request(args: Dict[str, Any]) -> dict:
+        plan_id = str(args.get("plan_id") or "").strip()
+        if not plan_id:
+            raise ValueError("缺少参数 plan_id")
+        reason = str(args.get("reason") or "").strip()
+        proposed = {
+            k: args[k] for k in (
+                "title", "goal", "why", "end_date", "daily_minutes",
+                "plan_text", "acceptance_criteria", "routine",
+            )
+            if k in args and args.get(k) is not None
+        }
+        result = repo.create_adjustment_request(plan_id, reason=reason, **proposed)
+        if result is None:
+            raise ValueError(f"未找到任务：{plan_id}")
+        adjustment = result["adjustment"]
+        changed = "、".join(sorted(adjustment["proposed"].keys()))
+        return {
+            "content": (
+                f"已提交调整请求（{adjustment['adjustment_id']}）："
+                f"{adjustment['reason']}（变更字段：{changed}）。"
+                "等待用户确认，确认前不会生效。"
+            ),
+            "adjustment": adjustment,
+            "plan": result["plan"],
+        }
+
+    def _task_adjust_confirm(args: Dict[str, Any]) -> dict:
+        plan_id = str(args.get("plan_id") or "").strip()
+        adjustment_id = str(args.get("adjustment_id") or "").strip()
+        if not plan_id or not adjustment_id:
+            raise ValueError("缺少参数 plan_id / adjustment_id")
+        accepted = bool(args.get("accepted"))
+        result = repo.confirm_adjustment(
+            plan_id,
+            adjustment_id,
+            accepted=accepted,
+            decision=str(args.get("reason") or "").strip(),
+        )
+        if result is None:
+            raise ValueError(f"未找到任务：{plan_id} 或调整请求：{adjustment_id}")
+        adjustment = result["adjustment"]
+        plan = result["plan"]
+        if result.get("already_resolved"):
+            return {
+                "content": f"该调整请求已裁决（{adjustment['status']}），无需重复确认",
+                "adjustment": adjustment,
+                "plan": plan,
+            }
+        if accepted:
+            proposed = adjustment.get("proposed") or {}
+            _sync_task_cognition(
+                plan,
+                title=proposed.get("title"),
+                goal=proposed.get("goal"),
+                end_date=proposed.get("end_date"),
+                touch=True,
+            )
+            return {
+                "content": f"调整已确认并生效：{plan['title']}（{adjustment['adjustment_id']}）",
+                "adjustment": adjustment,
+                "plan": plan,
+            }
+        return {
+            "content": f"调整已驳回：{adjustment['adjustment_id']}，方案保持原样",
+            "adjustment": adjustment,
+            "plan": plan,
+        }
+
     # ---------------- 里程碑 ----------------
 
     def _task_milestone(args: Dict[str, Any]) -> dict:
@@ -347,6 +445,9 @@ def _make_handlers(
         "task_archive": _task_archive,
         "task_milestone": _task_milestone,
         "task_complete_milestone": _task_complete_milestone,
+        "task_lock": _task_lock,
+        "task_adjust_request": _task_adjust_request,
+        "task_adjust_confirm": _task_adjust_confirm,
     }
 
 
@@ -387,6 +488,26 @@ _TASK_TOOLS = [
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "整体验收标准（可选）：满足哪些条件才算完成",
+            },
+            "routine": {
+                "type": "object",
+                "description": "重复日程模板（可选）：recurrence=daily/weekly，blocks 为每天重复的工作安排块。"
+                "用于每天固定重复的节奏（如上午审查/中午内容/下午任务）",
+                "properties": {
+                    "recurrence": {"type": "string", "enum": ["daily", "weekly"]},
+                    "blocks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string", "description": "块名称，如 上午审查"},
+                                "slot": {"type": "string", "description": "时段，如 上午 3-4h"},
+                                "focus": {"type": "string", "description": "专注内容/主线"},
+                                "minutes": {"type": "integer", "description": "预计分钟数"},
+                            },
+                        },
+                    },
+                },
             },
             "milestones": {
                 "type": "array",
@@ -479,6 +600,42 @@ _TASK_TOOLS = [
         },
         ["plan_id", "milestone_id"],
     ),
+    _tool(
+        "task_lock",
+        "【通用规划器】确认方案并锁定：锁定后核心字段（目标/截止/时长/方案文本/验收标准/重复日程）不可直接修改。"
+        "方案确定后 agent 不得随意更改；如需调整必须先 task_adjust_request 再经用户确认",
+        {"plan_id": {"type": "string", "description": "任务 ID"}},
+        ["plan_id"],
+    ),
+    _tool(
+        "task_adjust_request",
+        "【通用规划器】对已锁定方案提交调整请求（待用户确认后才生效）："
+        "规则层只记录不应用，用于方案确定后 agent 认为需要改动的场景",
+        {
+            "plan_id": {"type": "string", "description": "任务 ID"},
+            "reason": {"type": "string", "description": "调整原因（为什么改）"},
+            "title": {"type": "string"},
+            "goal": {"type": "string"},
+            "why": {"type": "string"},
+            "end_date": {"type": "string", "description": "ISO 日期"},
+            "daily_minutes": {"type": "integer"},
+            "plan_text": {"type": "string", "description": "更新完整规划方案"},
+            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+            "routine": {"type": "object", "description": "重复日程模板（recurrence + blocks）"},
+        },
+        ["plan_id", "reason"],
+    ),
+    _tool(
+        "task_adjust_confirm",
+        "【通用规划器】用户裁决调整请求：accepted=true 应用变更并记入决策日志，false 驳回保持原样",
+        {
+            "plan_id": {"type": "string", "description": "任务 ID"},
+            "adjustment_id": {"type": "string", "description": "调整请求 ID（adj_ 开头）"},
+            "accepted": {"type": "boolean", "description": "是否接受该调整"},
+            "reason": {"type": "string", "description": "裁决说明（可选）"},
+        },
+        ["plan_id", "adjustment_id", "accepted"],
+    ),
 ]
 
 
@@ -489,7 +646,7 @@ def register_planner_tools(
     user_id: str = "chat_user",
     level: str = "skill",
 ) -> None:
-    """把 8 个通用规划工具注册进注册表（handler 与 schema 成对注册，T2 技能层）"""
+    """把 11 个通用规划工具注册进注册表（handler 与 schema 成对注册，T2 技能层）"""
     handlers = _make_handlers(plan_repo, cognitive_repo, user_id)
     for tool in _TASK_TOOLS:
         name = tool["function"]["name"]
