@@ -121,6 +121,7 @@ public class MainActivity extends Activity {
 
         // WebView
         webView = new WebView(this);
+        WebView.setWebContentsDebuggingEnabled(true);
         WebSettings ws = webView.getSettings();
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
@@ -181,7 +182,38 @@ public class MainActivity extends Activity {
                 }
                 return true;
             }
+            @Override
+            public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
+                Log.d("AionWeb", consoleMessage.message()
+                        + " [" + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + "]");
+                return true;
+            }
         });
+        webView.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View v) {
+                WebView.HitTestResult hr = webView.getHitTestResult();
+                int type = hr == null ? 0 : hr.getType();
+                if (type == WebView.HitTestResult.IMAGE_TYPE
+                        || type == WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) {
+                    final String imgUrl = hr.getExtra();
+                    if (imgUrl != null) {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("\u56fe\u7247\u64cd\u4f5c")
+                                .setItems(new String[]{"\u4fdd\u5b58\u56fe\u7247\u5230\u76f8\u518c"}, new android.content.DialogInterface.OnClickListener() {
+                                    @Override
+                                    public void onClick(android.content.DialogInterface dialog, int which) {
+                                        saveImageToPhoneAsync(imgUrl, guessImageName(imgUrl));
+                                    }
+                                })
+                                .show();
+                        return true;
+                    }
+                }
+                return false;
+            }
+        });
+
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void openSettings() {
@@ -205,18 +237,7 @@ public class MainActivity extends Activity {
 
             @JavascriptInterface
             public void saveImage(final String url, final String name) {
-                new Thread(new Runnable() {
-                    @Override
-                    public void run() {
-                        final String msg = saveImageToPhone(url, name);
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
-                            }
-                        });
-                    }
-                }).start();
+                saveImageToPhoneAsync(url, name);
             }
         }, "AionAndroid");
         root.addView(webView, new LinearLayout.LayoutParams(
@@ -505,6 +526,30 @@ public class MainActivity extends Activity {
 
 
     /** \u5c06\u804a\u5929\u4e2d\u7684\u56fe\u7247\u4fdd\u5b58\u5230\u624b\u673a\uff08\u76f8\u518c/\u4e0b\u8f7d\u76ee\u5f55\uff09 */
+    private void saveImageToPhoneAsync(final String url, final String name) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String msg = saveImageToPhone(url, name);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private static String guessImageName(String url) {
+        String clean = url == null ? "" : url.split("[?#]")[0];
+        String name = clean.substring(clean.lastIndexOf('/') + 1);
+        if (name.isEmpty() || !name.contains(".")) {
+            name = "aion_" + Math.abs((url == null ? "" : url).hashCode()) + ".png";
+        }
+        return name;
+    }
+
     private String saveImageToPhone(String url, String name) {
         if (url == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
             return "\u65e0\u6548\u7684\u56fe\u7247\u5730\u5740";

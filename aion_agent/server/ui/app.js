@@ -135,6 +135,26 @@ if (IS_APK) {
   });
 }
 
+/* APK：键盘弹出时隐藏底部导航，聊天区贴底显示最新消息 */
+if (IS_APK) {
+  let baseH = window.innerHeight;
+  window.addEventListener("orientationchange", () => {
+    document.documentElement.classList.remove("kb-open");
+    baseH = window.innerHeight;
+  });
+  window.addEventListener("resize", () => {
+    const cur = window.innerHeight;
+    if (cur >= baseH - 60) {
+      document.documentElement.classList.remove("kb-open");
+      baseH = cur;
+    } else {
+      document.documentElement.classList.add("kb-open");
+      const chat = els.chat;
+      chat.scrollTop = chat.scrollHeight;
+    }
+  });
+}
+
 /* ---------- 时间格式化 / 日期分隔 ---------- */
 
 let lastMsgDate = "";
@@ -1480,7 +1500,10 @@ els.fileInput.addEventListener("change", async () => {
   const files = Array.from(els.fileInput.files || []);
   els.fileInput.value = "";
   for (const f of files) {
-    if (!f.type.startsWith("image/")) { toast("仅支持图片文件", 3000); continue; }
+    console.log("[upload]", f && f.name, f && f.type, f && f.size);
+    // WebView 从相册选择的文件可能没有 MIME 类型：只在明确非图片时拒绝，其余交给后端校验
+    const isImage = !f.type || f.type.startsWith("image/");
+    if (!isImage) { toast("仅支持图片文件", 3000); continue; }
     if (f.size > 10 * 1024 * 1024) { toast("图片过大（上限 10MB）", 3000); continue; }
     const fd = new FormData();
     fd.append("file", f);
