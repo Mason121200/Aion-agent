@@ -184,6 +184,37 @@ def test_resolve_ref_env_var_takes_precedence(monkeypatch, tmp_path):
     assert agnes_client._resolve_image_ref("/uploads/a.png") == expected
 
 
+def test_generate_image_multi_refs_resolve_to_data_uris(monkeypatch, tmp_path):
+    """\u591a\u56fe\u751f\u56fe\uff1a\u6bcf\u4e2a /uploads/ \u53c2\u8003\u56fe\u90fd\u5e94\u8f6c base64\uff0c\u4e0d\u80fd\u53ea\u5904\u7406\u7b2c\u4e00\u5f20\u3002"""
+    import base64
+
+    from aion_agent.server import local_server as ls
+    from aion_agent.server.runtime import AppRuntime
+
+    monkeypatch.setenv("AGNES_API_KEY", "test_key")
+    rt = AppRuntime(data_dir=tmp_path)
+    monkeypatch.setattr(ls, "_runtime", rt)
+    uploads = tmp_path / "uploads"
+    uploads.mkdir(parents=True)
+    for i in range(3):
+        (uploads / ("a%d.png" % i)).write_bytes(_TINY_PNG)
+    captured = {}
+
+    def fake_http(url, headers=None, payload=None, timeout=None):
+        captured["payload"] = payload
+        return 200, '{"data": [{"url": "u"}]}'
+
+    monkeypatch.setattr(agnes_client, "_http_request", fake_http)
+    agnes_client.generate_image(
+        "\u7b2c\u4e00\u5f20\u505a\u6a21\u7279\uff0c\u7b2c\u4e8c\u5f20\u505a\u4ea7\u54c1",
+        ref_images=["/uploads/a0.png", "/uploads/a1.png", "/uploads/a2.png"],
+    )
+    imgs = captured["payload"]["extra_body"]["image"]
+    assert len(imgs) == 3
+    for ref in imgs:
+        assert ref.startswith("data:image/png;base64,")
+
+
 def test_generate_image_converts_local_ref_to_data_uri(monkeypatch, tmp_path):
     import base64
 
