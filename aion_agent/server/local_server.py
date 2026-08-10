@@ -3,6 +3,8 @@
 实现与 FastAPI 版一致的 API 协议，Web UI（PWA）无需任何改动：
     GET    /api/health                 服务与 LLM 配置状态
     POST   /api/config/agnes           Agnes 生图/视频配置（key/URL/模型）
+    POST   /api/upload                 图片上传（multipart/form-data）
+    GET    /uploads/*                  已上传图片的静态访问
     POST   /api/session                创建/复用会话
     POST   /api/chat                   SSE 流式对话（ReAct 循环事件）
     GET    /api/sessions               会话列表
@@ -13,6 +15,18 @@
     GET    /api/study/overview         学习概览（计划/进度/提醒/资料）
     POST   /api/study/complete_reminder 完成提醒
     POST   /api/study/log_session      记录学习时长
+    GET    /api/study/plans/{id}        学习计划详情（含测试/错题/复习）
+    POST   /api/study/tests             记录测试成绩
+    POST   /api/study/mistakes          添加错题
+    GET    /api/study/plans/{id}/analysis 计划效果分析
+    POST   /api/study/plans/{id}/reviews/{rid}/checkin 复习打卡
+    GET    /api/sync/status             跨设备同步状态
+    GET    /api/sync/export             导出同步包
+    POST   /api/sync/import             导入同步包
+    POST   /api/sync/pull               从对端拉取同步包
+    GET    /api/skills                  技能列表（含启停状态）
+    POST   /api/skills/{name}/toggle    启停技能
+    GET    /api/tools                   工具目录与权限策略
     GET    /api/study/notifications    待展示的到期提醒
     POST   /api/study/notifications/ack 确认已展示提醒
     GET    / /static/* /sw.js          Web UI（PWA）
@@ -27,11 +41,13 @@ import asyncio
 import json
 import logging
 import os
+import re
+import uuid
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 from aion_agent.llm.openai_compatible import load_env_from_dotenv
 from aion_agent.server.runtime import (
@@ -43,6 +59,7 @@ from aion_agent.server.runtime import (
     _triple_to_dict,
     _ui_dir,
 )
+from aion_agent.skills import build_default_skills
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +69,10 @@ _MIME = {
     ".css": "text/css; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".bmp": "image/bmp",
     ".webmanifest": "application/manifest+json; charset=utf-8",
     ".svg": "image/svg+xml",
     ".txt": "text/plain; charset=utf-8",
@@ -63,6 +84,55 @@ _server: Optional[ThreadingHTTPServer] = None
 
 def get_runtime() -> Optional[AppRuntime]:
     return _runtime
+
+
+def _catalog_tools(rt: AppRuntime) -> list:
+    """构建一次性的工具目录：默认技能全量注册，返回工具名 + 权限 + 所属技能"""
+    from aion_agent.tools import ToolRegistry
+
+    skills = build_default_skills(
+        cognitive_repo=rt.repo,
+        study_repo=rt.repo_study,
+        planner_repo=rt.repo_planner,
+        user_id="chat_user",
+    )
+    registry = ToolRegistry()
+    skill_of: Dict[str, str] = {}
+    for skill in skills:
+        for name in skill.tools:
+            skill_of[name] = skill.name
+        skill.register_tools(registry)
+    return [
+        {"name": e["name"], "permission": e["permission"], "level": e["level"],
+         "skill": skill_of.get(e["name"], "")}
+        for e in registry.list_tool_entries()
+    ]
+
+
+_ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+def _parse_multipart(body: bytes, content_type: str) -> Optional[dict]:
+    """极简 multipart/form-data 解析：提取名为 file 的文件字段（纯标准库）"""
+    m = re.search(r'boundary="?([^";]+)"?', content_type or "")
+    if not m:
+        return None
+    boundary = m.group(1).encode("utf-8")
+    for part in body.split(b"--" + boundary):
+        if b"\r\n\r\n" not in part:
+            continue
+        header, _, content = part.partition(b"\r\n\r\n")
+        head_text = header.decode("utf-8", errors="replace")
+        if 'name="file"' not in head_text:
+            continue
+        fm = re.search(r'filename="([^"]*)"', head_text)
+        filename = fm.group(1) if fm else ""
+        return {
+            "filename": filename,
+            "content": content[:-2] if content.endswith(b"\r\n") else content,
+        }
+    return None
 
 
 class LocalHandler(BaseHTTPRequestHandler):
@@ -129,6 +199,49 @@ class LocalHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
         return True
 
+    def _serve_upload(self, path: str, rt: AppRuntime) -> bool:
+        """返回 True 表示已处理（含 404）；服务 data_dir/uploads 下的文件"""
+        upload_root = (rt.data_dir / "uploads").resolve()
+        rel = path[len("/uploads/"):].lstrip("/")
+        target = (upload_root / rel).resolve()
+        if not str(target).startswith(str(upload_root)):
+            self._send_error_json(404, "not found")
+            return True
+        if not target.is_file():
+            self._send_error_json(404, "not found")
+            return True
+        mime = _MIME.get(target.suffix.lower(), "application/octet-stream")
+        data = target.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", mime)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+        self.wfile.flush()
+        return True
+
+
+    def _study_plan_get(self, path: str, q: dict, rt: AppRuntime) -> None:
+        rest = path[len("/api/study/plans/"):]
+        if rest.endswith("/analysis"):
+            plan_id = rest[:-len("/analysis")]
+            try:
+                self._send_json(200, rt.repo_study.analyze(plan_id=plan_id, days=int(q.get("days") or 7)))
+            except ValueError as e:
+                self._send_error_json(404, str(e))
+            return
+        plan_id = rest
+        detail = rt.repo_study.plan_detail(plan_id)
+        if detail is None:
+            self._send_error_json(404, f"未找到计划 {plan_id}")
+            return
+        detail["tests"] = rt.repo_study.list_tests(plan_id=plan_id)
+        detail["mistakes"] = rt.repo_study.list_mistakes(plan_id=plan_id, include_resolved=True)
+        detail["reviews"] = rt.repo_study.list_reviews(plan_id=plan_id, include_done=True)
+        self._send_json(200, detail)
+
+
     # ---------- GET ----------
 
     def do_GET(self):  # noqa: N802
@@ -165,6 +278,26 @@ class LocalHandler(BaseHTTPRequestHandler):
                 self._send_json(200, rt.repo_study.overview())
             elif path == "/api/study/notifications":
                 self._send_json(200, {"notifications": rt.pending_notifications()})
+            elif path.startswith("/api/study/plans/"):
+                self._study_plan_get(path, q, rt)
+            elif path == "/api/sync/status":
+                self._send_json(200, rt.sync_status())
+            elif path == "/api/sync/export":
+                self._send_json(200, rt.sync_export())
+            elif path == "/api/skills":
+                skills = []
+                for s in build_default_skills(
+                    cognitive_repo=rt.repo,
+                    study_repo=rt.repo_study,
+                    planner_repo=rt.repo_planner,
+                    user_id="chat_user",
+                ):
+                    skills.append({**s.to_dict(), "enabled": rt.is_skill_enabled(s.name)})
+                self._send_json(200, {"skills": skills})
+            elif path == "/api/tools":
+                self._send_json(200, {"tools": _catalog_tools(rt), "policy": rt.tool_policy.to_dict()})
+            elif path.startswith("/uploads/"):
+                self._serve_upload(path, rt)
             elif path.startswith("/api/"):
                 self._send_error_json(404, "unknown api")
             else:
@@ -175,6 +308,36 @@ class LocalHandler(BaseHTTPRequestHandler):
             logger.exception("GET 处理失败: %s", path)
             self._send_error_json(500, str(e))
 
+    def _handle_upload(self, rt: AppRuntime) -> None:
+        """处理图片上传（multipart/form-data），保存到 data_dir/uploads"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                self._send_error_json(400, "空文件")
+                return
+            raw = self.rfile.read(length)
+            parsed = _parse_multipart(raw, self.headers.get("Content-Type") or "")
+            if not parsed or not parsed["content"]:
+                self._send_error_json(400, "缺少文件字段 file")
+                return
+            ext = (Path(parsed["filename"] or "").suffix or ".png").lower()
+            if ext not in _ALLOWED_IMAGE_EXT:
+                self._send_error_json(400, f"不支持的图片格式: {ext}")
+                return
+            if len(parsed["content"]) > _MAX_UPLOAD_BYTES:
+                self._send_error_json(400, "图片过大（上限 10MB）")
+                return
+            upload_dir = rt.data_dir / "uploads"
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            name = f"up_{uuid.uuid4().hex[:12]}{ext}"
+            (upload_dir / name).write_bytes(parsed["content"])
+            self._send_json(200, {"url": f"/uploads/{name}", "name": name})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("上传处理失败")
+            self._send_error_json(500, str(e))
+
+
+    # ---------- POST ----------
     # ---------- POST ----------
 
     def do_POST(self):  # noqa: N802
@@ -182,6 +345,9 @@ class LocalHandler(BaseHTTPRequestHandler):
         rt = _runtime
         if rt is None:
             self._send_error_json(503, "runtime not initialized")
+            return
+        if path == "/api/upload":
+            self._handle_upload(rt)
             return
         body = self._read_json_body()
         try:
@@ -263,6 +429,73 @@ class LocalHandler(BaseHTTPRequestHandler):
                     "session": session,
                     "today_minutes": rt.repo_study.today_minutes(),
                 })
+            elif path == "/api/study/tests":
+                plan_id = str(body.get("plan_id") or "").strip()
+                total = int(body.get("total") or 0)
+                if not plan_id or total <= 0:
+                    raise ConfigError("缺少参数 plan_id / total（total 需大于 0）")
+                try:
+                    test = rt.repo_study.add_test(
+                        plan_id=plan_id,
+                        title=str(body.get("title") or "").strip(),
+                        score=int(body.get("score") or 0),
+                        total=total,
+                        correct=body.get("correct"),
+                        knowledge_points=body.get("knowledge_points") or [],
+                        note=str(body.get("note") or "").strip(),
+                    )
+                except ValueError as e:
+                    self._send_error_json(400, str(e))
+                    return
+                self._send_json(200, {"test": test})
+            elif path == "/api/study/mistakes":
+                plan_id = str(body.get("plan_id") or "").strip()
+                content = str(body.get("content") or "").strip()
+                if not plan_id or not content:
+                    raise ConfigError("缺少参数 plan_id / content")
+                try:
+                    mistake = rt.repo_study.add_mistake(
+                        plan_id=plan_id, content=content,
+                        reason=str(body.get("reason") or "").strip(),
+                        knowledge_point=str(body.get("knowledge_point") or "").strip(),
+                    )
+                except ValueError as e:
+                    self._send_error_json(400, str(e))
+                    return
+                self._send_json(200, {"mistake": mistake})
+            elif path.startswith("/api/study/plans/") and path.endswith("/checkin"):
+                inner = path[len("/api/study/plans/"):-len("/checkin")]
+                plan_id, _, review_item_id = inner.partition("/reviews/")
+                try:
+                    item = rt.repo_study.review_checkin(
+                        plan_id=plan_id, review_item_id=review_item_id,
+                        correct=bool(body.get("correct")),
+                    )
+                except ValueError as e:
+                    self._send_error_json(400, str(e))
+                    return
+                due = rt.repo_study.schedule_reviews(plan_id)
+                self._send_json(200, {"review_item": item, "due_remaining": len(due)})
+            elif path == "/api/sync/import":
+                bundle = body.get("bundle")
+                if not isinstance(bundle, dict):
+                    raise ConfigError("缺少参数 bundle")
+                self._send_json(200, {"merged": rt.sync_import(bundle)})
+            elif path == "/api/sync/pull":
+                url = str(body.get("url") or "").strip()
+                if not url:
+                    raise ConfigError("缺少参数 url")
+                try:
+                    self._send_json(200, {"merged": rt.sync_pull(url)})
+                except Exception as e:  # noqa: BLE001
+                    self._send_error_json(400, f"拉取失败: {e}")
+            elif path.startswith("/api/skills/") and path.endswith("/toggle"):
+                name = path[len("/api/skills/"):-len("/toggle")]
+                enabled = bool(body.get("enabled", True))
+                if not rt.set_skill_enabled(name, enabled):
+                    self._send_error_json(404, f"未找到技能: {name}")
+                    return
+                self._send_json(200, {"name": name, "enabled": enabled})
             else:
                 self._send_error_json(404, "unknown api")
         except ConfigError as e:
@@ -311,6 +544,7 @@ class LocalHandler(BaseHTTPRequestHandler):
         rt = _runtime
         user_id = str(body.get("user_id") or "chat_user")
         session_id = body.get("session_id") or None
+        images = [str(u).strip() for u in (body.get("images") or []) if str(u).strip()]
         session = rt.create_session(user_id, session_id)
 
         self.send_response(200)
@@ -322,7 +556,7 @@ class LocalHandler(BaseHTTPRequestHandler):
 
         async def drive():
             try:
-                async for event in session.react_stream(message):
+                async for event in session.react_stream(message, images=images):
                     self._write_sse(event)
             except Exception as e:  # noqa: BLE001
                 logger.exception("chat 流式处理失败")
@@ -399,6 +633,8 @@ def start_local_server(
         _load_env(data)
     rt = AppRuntime(data_dir=data)
     _runtime = rt
+    uploads = rt.data_dir / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((host, port), LocalHandler)
     server.daemon_threads = True
     _server = server

@@ -1,6 +1,12 @@
 package com.aion.agent;
 
 import android.app.Activity;
+import android.Manifest;
+import android.content.ContentValues;
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -16,6 +22,9 @@ import android.webkit.WebSettings;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.webkit.JsResult;
+import android.webkit.ValueCallback;
+import android.webkit.WebChromeClient;
 import android.util.Log;
 import android.widget.Button;
 import android.widget.EditText;
@@ -28,6 +37,8 @@ import com.chaquo.python.PyObject;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -54,6 +65,11 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private volatile boolean engineReady = false;
     private volatile String lastHealthError = "";
+    private static final int REQ_FILE_CHOOSER = 1001;
+    private static final int REQ_WRITE_STORAGE = 1002;
+    private ValueCallback<Uri[]> uploadCallback;
+    private volatile String pendingSaveUrl;
+    private volatile String pendingSaveName;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -110,6 +126,62 @@ public class MainActivity extends Activity {
         ws.setDomStorageEnabled(true);
         ws.setDatabaseEnabled(true);
         webView.setWebViewClient(new WebViewClient());
+
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setPositiveButton("\u786e\u5b9a", new android.content.DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface dialog, int which) {
+                                result.confirm();
+                            }
+                        })
+                        .setCancelable(false)
+                        .show();
+                return true;
+            }
+
+            @Override
+            public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
+                new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message)
+                        .setPositiveButton("\u786e\u5b9a", new android.content.DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface dialog, int which) {
+                                result.confirm();
+                            }
+                        })
+                        .setNegativeButton("\u53d6\u6d88", new android.content.DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(android.content.DialogInterface dialog, int which) {
+                                result.cancel();
+                            }
+                        })
+                        .setCancelable(false)
+                        .show();
+                return true;
+            }
+
+            @Override
+            public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> filePathCallback,
+                                             WebChromeClient.FileChooserParams fileChooserParams) {
+                if (uploadCallback != null) {
+                    uploadCallback.onReceiveValue(null);
+                }
+                uploadCallback = filePathCallback;
+                Intent intent = fileChooserParams.createIntent();
+                intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                try {
+                    startActivityForResult(intent, REQ_FILE_CHOOSER);
+                } catch (Exception e) {
+                    uploadCallback = null;
+                    return false;
+                }
+                return true;
+            }
+        });
         webView.addJavascriptInterface(new Object() {
             @JavascriptInterface
             public void openSettings() {
@@ -129,6 +201,22 @@ public class MainActivity extends Activity {
                         showSystemNotification(title, body);
                     }
                 });
+            }
+
+            @JavascriptInterface
+            public void saveImage(final String url, final String name) {
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        final String msg = saveImageToPhone(url, name);
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                            }
+                        });
+                    }
+                }).start();
             }
         }, "AionAndroid");
         root.addView(webView, new LinearLayout.LayoutParams(
@@ -413,6 +501,158 @@ public class MainActivity extends Activity {
 
     private int dp(int value) {
         return Math.round(getResources().getDisplayMetrics().density * value);
+    }
+
+
+    /** \u5c06\u804a\u5929\u4e2d\u7684\u56fe\u7247\u4fdd\u5b58\u5230\u624b\u673a\uff08\u76f8\u518c/\u4e0b\u8f7d\u76ee\u5f55\uff09 */
+    private String saveImageToPhone(String url, String name) {
+        if (url == null || !(url.startsWith("http://") || url.startsWith("https://"))) {
+            return "\u65e0\u6548\u7684\u56fe\u7247\u5730\u5740";
+        }
+        String safeName = sanitizeName(name);
+        if (Build.VERSION.SDK_INT >= 29) {
+            return writeToMediaStore(url, safeName);
+        }
+        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+            pendingSaveUrl = url;
+            pendingSaveName = safeName;
+            requestPermissions(
+                    new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                    REQ_WRITE_STORAGE);
+            return "\u9700\u8981\u5b58\u50a8\u6743\u9650\uff0c\u8bf7\u5728\u5f39\u51fa\u7684\u6388\u6743\u6846\u4e2d\u5141\u8bb8";
+        }
+        return writeToLegacyDownload(url, safeName);
+    }
+
+    private String writeToMediaStore(String url, String name) {
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Downloads.DISPLAY_NAME, name);
+        values.put(MediaStore.Downloads.MIME_TYPE, mimeFor(name));
+        values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/AionAgent");
+        Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) {
+            return "\u4fdd\u5b58\u5931\u8d25\uff1a\u65e0\u6cd5\u521b\u5efa\u6587\u4ef6";
+        }
+        try {
+            InputStream in = openStream(url);
+            OutputStream out = getContentResolver().openOutputStream(uri);
+            if (in == null || out == null) {
+                throw new java.io.IOException("\u65e0\u6cd5\u6253\u5f00\u8f93\u5165/\u8f93\u51fa\u6d41");
+            }
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+            in.close();
+            out.close();
+            return "\u5df2\u4fdd\u5b58\u5230 \u4e0b\u8f7d/AionAgent/" + name;
+        } catch (Exception e) {
+            getContentResolver().delete(uri, null, null);
+            return "\u4fdd\u5b58\u5931\u8d25\uff1a" + e.getMessage();
+        }
+    }
+
+    private String writeToLegacyDownload(String url, String name) {
+        File dir = new File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "AionAgent");
+        if (!dir.exists() && !dir.mkdirs()) {
+            return "\u4fdd\u5b58\u5931\u8d25\uff1a\u65e0\u6cd5\u521b\u5efa\u76ee\u5f55";
+        }
+        File target = new File(dir, name);
+        try {
+            InputStream in = openStream(url);
+            FileOutputStream out = new FileOutputStream(target);
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+            in.close();
+            out.close();
+            return "\u5df2\u4fdd\u5b58\u5230 \u4e0b\u8f7d/AionAgent/" + name;
+        } catch (Exception e) {
+            return "\u4fdd\u5b58\u5931\u8d25\uff1a" + e.getMessage();
+        }
+    }
+
+    private InputStream openStream(String url) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) new URL(url).openConnection();
+        conn.setConnectTimeout(15000);
+        conn.setReadTimeout(30000);
+        conn.setInstanceFollowRedirects(true);
+        return conn.getInputStream();
+    }
+
+    private static String sanitizeName(String name) {
+        String n = name == null ? "" : name.trim();
+        if (n.isEmpty()) {
+            n = "aion_image";
+        }
+        n = n.replaceAll("[/:*?\"<>|]", "_");
+        if (n.indexOf('.') < 0) {
+            n = n + ".png";
+        }
+        return n;
+    }
+
+    private static String mimeFor(String name) {
+        String lower = name == null ? "" : name.toLowerCase();
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+            return "image/jpeg";
+        }
+        if (lower.endsWith(".gif")) {
+            return "image/gif";
+        }
+        if (lower.endsWith(".webp")) {
+            return "image/webp";
+        }
+        if (lower.endsWith(".bmp")) {
+            return "image/bmp";
+        }
+        return "image/png";
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_FILE_CHOOSER && uploadCallback != null) {
+            uploadCallback.onReceiveValue(
+                    WebChromeClient.FileChooserParams.parseResult(resultCode, data));
+            uploadCallback = null;
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_WRITE_STORAGE) {
+            return;
+        }
+        boolean granted = grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        final String url = pendingSaveUrl;
+        final String name = pendingSaveName;
+        pendingSaveUrl = null;
+        pendingSaveName = null;
+        if (!granted || url == null) {
+            Toast.makeText(this, "\u672a\u6388\u4e88\u5b58\u50a8\u6743\u9650\uff0c\u65e0\u6cd5\u4fdd\u5b58\u56fe\u7247", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final String msg = writeToLegacyDownload(url, name);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        Toast.makeText(MainActivity.this, msg, Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
     }
 
     @Override

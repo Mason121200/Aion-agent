@@ -86,6 +86,55 @@ function imgHtml(url) {
   return `<img class="md-img" src="${esc(url)}" alt="图片" loading="lazy" referrerpolicy="no-referrer" onerror="imgFail(this)">`;
 }
 
+
+/* ---------- APK \u624b\u673a\u7aef\uff1a\u5927\u56fe\u9884\u89c8\u4e0e\u4fdd\u5b58 ---------- */
+
+const IS_APK = !!window.AionAndroid;
+if (IS_APK) document.documentElement.classList.add("apk");
+
+function openLightbox(src, name) {
+  const overlay = document.createElement("div");
+  overlay.className = "lightbox";
+  const abs = new URL(src, location.href).href;
+  overlay.innerHTML = `<div class="lightbox-body">
+    <img src="${esc(abs)}" alt="\u9884\u89c8" referrerpolicy="no-referrer" onerror="imgFail(this)">
+    <div class="lightbox-bar">
+      <span class="lb-name">${esc(name || "\u56fe\u7247")}</span>
+      <button class="lb-save">\u4fdd\u5b58\u56fe\u7247</button>
+      <button class="lb-close">\u5173\u95ed</button>
+    </div>
+  </div>`;
+  const saveBtn = overlay.querySelector(".lb-save");
+  saveBtn.addEventListener("click", () => {
+    const extMatch = abs.split("?")[0].match(/\.(png|jpe?g|gif|webp|bmp)$/i);
+    const base = (name || "aion_image").replace(/\.[^.]+$/, "");
+    const fname = base + "." + ((extMatch && extMatch[1]) || "png");
+    if (window.AionAndroid && window.AionAndroid.saveImage) {
+      saveBtn.textContent = "\u4fdd\u5b58\u4e2d\u2026";
+      saveBtn.disabled = true;
+      window.AionAndroid.saveImage(abs, fname);
+    } else {
+      window.open(abs, "_blank");
+    }
+  });
+  overlay.querySelector(".lb-close").addEventListener("click", () => overlay.remove());
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+}
+
+if (IS_APK) {
+  els.chat.addEventListener("click", (e) => {
+    const img = e.target.closest ? e.target.closest("img.md-img") : null;
+    if (img) {
+      e.preventDefault();
+      e.stopPropagation();
+      openLightbox(img.currentSrc || img.src, img.alt || "");
+    }
+  });
+}
+
 /* ---------- 时间格式化 / 日期分隔 ---------- */
 
 let lastMsgDate = "";
