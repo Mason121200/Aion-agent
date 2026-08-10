@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import textwrap
 import uuid
+from datetime import datetime
 from typing import AsyncGenerator, Dict, List, Optional
 
 import re
@@ -25,7 +27,11 @@ from aion_agent.storage.json_chat_repo import JsonChatRepo
 from aion_agent.skills import SkillRegistry, build_default_skills
 from aion_agent.tools import ToolExecutor, ToolRegistry
 from aion_agent.use_cases.cognition_injector import CognitionInjector
-from aion_agent.use_cases.react.prompts import REACT_TOOL_HINT
+from aion_agent.use_cases.react.prompts import (
+    ECOMMERCE_TOOL_HINT,
+    REACT_TOOL_HINT,
+    STUDY_TOOL_HINT,
+)
 from aion_agent.use_cases.react.react_loop import ReActLoop
 
 logger = logging.getLogger(__name__)
@@ -97,7 +103,7 @@ class ReActChatSession:
         disabled_skills=None,
         tools_enabled: bool = True,
         llm_reflect_enabled: bool = True,
-        tool_timeout_seconds: int = 30,
+        tool_timeout_seconds: int = 120,
     ):
         self._llm = llm
         self._user_id = user_id
@@ -162,18 +168,22 @@ class ReActChatSession:
     # ==================== 主入口 ====================
 
     async def react_stream(
-        self, user_message: str
+        self,
+        user_message: str,
+        images: Optional[List[str]] = None,
     ) -> AsyncGenerator[Dict, None]:
         """ReAct 对话流：产出事件字典
 
         事件：reasoning / token / cognition / tool_call / tool_result /
               reflect / context / budget_exhausted / error / final / session
         """
-        # 1) 持久化用户消息
+        # 1) 持久化用户消息（images：用户上传的参考图 URL，随消息落库）
+        images = [str(u).strip() for u in (images or []) if str(u).strip()]
         await self._chat_repo.save_message(Message(
             session_id=self._session_id,
             role="user",
             content=user_message,
+            images=images,
         ))
         if self._execution_log is not None:
             self._execution_log.append(
@@ -191,30 +201,75 @@ class ReActChatSession:
         dynamic = await self._injector.build_dynamic_context(
             self._user_id, current_message=user_message,
         )
-        # 学习场景：把已到期/近期提醒注入动态上下文，agent 可主动提及
+        # 学习场景：到期提醒 / 到期复习 / 停滞 / 进行中计划 注入动态上下文，
+        # 让 agent 主动发起复习、主动提醒学习、主动采集数据
         if self._study_repo is not None:
             try:
-                due = self._study_repo.due_reminders()
-                upcoming = self._study_repo.upcoming_reminders(limit=3)
-                reminder_lines = []
+                ov = self._study_repo.overview()
+                ctx_lines = []
+                due = ov.get("due_reminders") or []
+                upcoming = ov.get("upcoming_reminders") or []
                 if due:
-                    reminder_lines.append("【已到期提醒】" + "；".join(
+                    ctx_lines.append("【已到期提醒】" + "；".join(
                         f"{r['title']}（{r['remind_at'][11:16]}）" for r in due
                     ))
                 if upcoming:
-                    reminder_lines.append("【近期提醒】" + "；".join(
+                    ctx_lines.append("【近期提醒】" + "；".join(
                         f"{r['title']}（{r['remind_at'][5:16].replace('T', ' ')}）"
                         for r in upcoming
                     ))
-                if reminder_lines:
-                    dynamic = (dynamic + "\n\n" if dynamic else "") + "\n".join(reminder_lines)
-            except Exception:  # noqa: BLE001 提醒注入失败不影响主流程
+                now_iso = datetime.now().isoformat()
+                review_due_lines = []
+                for p in ov.get("active_plans") or []:
+                    for it in self._study_repo.list_reviews(plan_id=p["plan_id"]):
+                        if it.get("resolved"):
+                            continue
+                        if (it.get("next_review_at") or "") <= now_iso:
+                            review_due_lines.append(f"{p['title']}·{it['content'][:40]}")
+                if review_due_lines:
+                    ctx_lines.append("【到期复习】" + "；".join(review_due_lines[:6]))
+                stagnant = [
+                    f"{p['title']}已停滞{p['stagnant_days']}天"
+                    for p in ov.get("active_plans") or []
+                    if (p.get("stagnant_days") or 0) >= 3
+                ]
+                if stagnant:
+                    ctx_lines.append("【学习停滞】" + "；".join(stagnant))
+                active = ov.get("active_plans") or []
+                if active:
+                    ctx_lines.append("【进行中计划】" + "；".join(
+                        f"{p['title']}（{p.get('progress_info', {}).get('progress', 0)}%）" for p in active[:3]
+                    ))
+                # 待裁决调整：规则层已出对比报告，由 LLM 决定是否采纳（confirm_adjustment）
+                pending_reviews = []
+                for p in active:
+                    for a in (p.get("adjustments") or []):
+                        if a.get("conclusion") != "pending_review":
+                            continue
+                        rep = a.get("report") or {}
+                        mets = "；".join(
+                            f"{m.get('label')} {m.get('before')}→{m.get('after')}"
+                            for m in (rep.get("metrics") or []) if m.get("improved") is not None
+                        )
+                        pending_reviews.append(
+                            f"{p['title']}·{str(a.get('content') or '')[:30]}（{mets or '数据不足'}）"
+                        )
+                if pending_reviews:
+                    ctx_lines.append("【待裁决调整】" + "；".join(pending_reviews[:3]))
+                profile_summary = self._study_repo.profile_summary()
+                if profile_summary:
+                    ctx_lines.append("【学习画像】" + profile_summary)
+                if ctx_lines:
+                    dynamic = (dynamic + "\n\n" if dynamic else "") + "\n".join(ctx_lines)
+            except Exception:  # noqa: BLE001 学习上下文注入失败不影响主流程
                 pass
         system = self._injector.build_static_system_prompt(
             base_prompt=self._base_prompt
         )
         if self._tools_enabled:
             system += REACT_TOOL_HINT
+            system += STUDY_TOOL_HINT
+            system += ECOMMERCE_TOOL_HINT
 
         # 4) ReAct 循环
         loop = ReActLoop(
@@ -238,20 +293,35 @@ class ReActChatSession:
         final_content = ""
         streamed_reply: List[str] = []
         cognition_count = 0
-        async for event in loop.run():
-            if event.get("type") == "token":
-                streamed_reply.append(event.get("content", ""))
-            elif event.get("type") == "final":
-                final_content = event.get("content", "")
-            elif event.get("type") == "cognition":
-                cognition_count += 1
-            elif event.get("type") == "error" and self._execution_log is not None:
-                self._execution_log.append(
-                    session_id=self._session_id,
-                    event_type="error",
-                    content=str(event.get("error", "")),
-                )
-            yield event
+        generated_images: List[str] = []
+        try:
+            async for event in loop.run():
+                if event.get("type") == "token":
+                    streamed_reply.append(event.get("content", ""))
+                elif event.get("type") == "final":
+                    final_content = event.get("content", "")
+                elif event.get("type") == "tool_retry":
+                    # 幻觉守卫触发：丢弃本轮已流出的文本，避免编造内容写入历史
+                    streamed_reply.clear()
+                elif event.get("type") == "tool_result":
+                    data = (event.get("tool_call") or {}).get("data") or {}
+                    url = str(data.get("image_url") or "").strip()
+                    if url:
+                        generated_images.append(url)
+                elif event.get("type") == "cognition":
+                    cognition_count += 1
+                elif event.get("type") == "error" and self._execution_log is not None:
+                    self._execution_log.append(
+                        session_id=self._session_id,
+                        event_type="error",
+                        content=str(event.get("error", "")),
+                    )
+                yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            # 客户端断开 / 用户停止生成：保存已流出的部分，避免丢失
+            partial = "".join(streamed_reply).strip() or final_content
+            await self._save_assistant_reply(partial)
+            raise
 
         # 兜底：LLM 未输出任何认知块时，用规则提取明确的自我介绍
         if not cognition_count:
@@ -261,18 +331,29 @@ class ReActChatSession:
         # 5) 持久化最终回复：优先保存完整流式回复（含工具调用前的正文），
         #    避免历史里只剩最后一段确认语；工具中间消息不入历史
         saved_reply = "".join(streamed_reply).strip() or final_content
-        if saved_reply:
-            await self._chat_repo.save_message(Message(
+        await self._save_assistant_reply(saved_reply, images=generated_images)
+
+    async def _save_assistant_reply(
+        self,
+        content: str,
+        images: Optional[List[str]] = None,
+    ) -> None:
+        """把助手回复写入会话历史 + 执行日志（空内容跳过）"""
+        content = str(content or "").strip()
+        if not content:
+            return
+        await self._chat_repo.save_message(Message(
+            session_id=self._session_id,
+            role="assistant",
+            content=content,
+            images=[str(u).strip() for u in (images or []) if str(u).strip()],
+        ))
+        if self._execution_log is not None:
+            self._execution_log.append(
                 session_id=self._session_id,
-                role="assistant",
-                content=saved_reply,
-            ))
-            if self._execution_log is not None:
-                self._execution_log.append(
-                    session_id=self._session_id,
-                    event_type="assistant_reply",
-                    content=saved_reply,
-                )
+                event_type="assistant_reply",
+                content=content,
+            )
 
     async def _rule_based_extract(self, user_message: str) -> list:
         """LLM 未输出认知块时的规则兜底：只提取高置信的自介绍句式"""

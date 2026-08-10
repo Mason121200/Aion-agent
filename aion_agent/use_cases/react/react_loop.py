@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -33,6 +34,67 @@ from aion_agent.use_cases.react.context_window import (
 from aion_agent.use_cases.react.observe import observe
 from aion_agent.use_cases.react.reflect import reflect, reflect_with_llm
 from aion_agent.use_cases.react.verify import format_correction, verify_with_llm
+
+_AGNES_OUTPUT_URL_RE = re.compile(
+    r"https://platform-outputs\.agnes-ai\.space/images/[^\s\"'）)\]]+"
+)
+_IMAGE_INTENT_RE = re.compile(
+    r"(生图|生成图片|生成图|重新生成|再生成|改图|修图|换背景|换底色|"
+    r"去水印|提升画质|提高画质|画质|清晰度|精修|美化|镜头|商品图|"
+    r"效果图|图生图|多图生图|参考图|出图)",
+    re.IGNORECASE,
+)
+_IMAGE_LINK_ONLY_RE = re.compile(r"(链接|地址|发我|给我|在哪)")
+_IMAGE_REF_TOOLS = {"edit_product_image", "submit_product_video"}
+_IMAGE_GUARD_CORRECTION = (
+    "⚠️ 纠正指令：用户请求的是图片生成/修改，但你刚才没有调用任何生图工具，"
+    "却输出了图片链接——未调用工具不会生成新图片，你输出的链接是无效/编造的。\n"
+    "请立即调用工具：文生图用 generate_product_image；基于参考图修改/生成用 "
+    "edit_product_image（image_urls 传【用户上传的参考图】中的 /uploads/ 链接，"
+    "或历史消息中工具实际返回过的图片链接）。\n"
+    "调用工具后，用工具返回的真实 image_url 回答用户，禁止编造链接。"
+)
+_IMAGE_REF_GUARD_CORRECTION = (
+    "⚠️ 纠正指令：你刚才给生图工具传了无效的参考图链接（{bad}），"
+    "这些链接从未被工具返回，属于编造或已失效的链接。\n"
+    "请改用【用户上传的参考图】中的 /uploads/ 链接，"
+    "或历史消息中工具实际返回过的图片链接，重新调用工具。"
+)
+
+
+def _extract_agnes_urls(text: str) -> set:
+    """提取文本中的 Agnes 输出图链接（platform-outputs.agnes-ai.space）"""
+    return set(_AGNES_OUTPUT_URL_RE.findall(text or ""))
+
+
+def _looks_like_image_intent(text: str) -> bool:
+    """判断用户消息是否包含图片生成/修改意图（生图守卫用）"""
+    text = text or ""
+    if not _IMAGE_INTENT_RE.search(text):
+        return False
+    # 仅索要历史链接（不含生成动作）不算生图意图
+    if _IMAGE_LINK_ONLY_RE.search(text) and not re.search(
+        r"(生成|重新|再|改|修|换|提升|提高|精修|美化)", text
+    ):
+        return False
+    return True
+
+
+def _invalid_image_refs(args: dict, known_good_urls: set) -> list:
+    """检查生图/视频工具的参考图链接：只校验 platform-outputs 链接是否真实存在过"""
+    args = args or {}
+    refs = []
+    for key in ("image_urls", "image_url"):
+        val = args.get(key)
+        if isinstance(val, str):
+            refs.extend(r.strip() for r in val.split(",") if r.strip())
+        elif isinstance(val, list):
+            refs.extend(str(r).strip() for r in val if str(r).strip())
+    bad = []
+    for ref in refs:
+        if "platform-outputs.agnes-ai.space" in ref and ref not in known_good_urls:
+            bad.append(ref)
+    return bad
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +136,7 @@ class ReActLoop:
         max_steps: int = 8,
         max_tokens_budget: int = 8000,
         max_context_messages: int = 20,
-        tool_timeout_seconds: int = 30,
+        tool_timeout_seconds: int = 120,
         llm_reflect_enabled: bool = True,
         verify_enabled: bool = True,
         execution_log=None,
@@ -109,6 +171,16 @@ class ReActLoop:
         """执行 ReAct 循环，产出事件流"""
         history = trim_history(self._history, self._max_context_messages)
 
+        # 已知真实图片链接：历史消息中持久化过的工具生成结果（msg.images）
+        known_good_urls = set()
+        for msg in history:
+            for u in (getattr(msg, "images", None) or []):
+                u = str(u or "").strip()
+                if u:
+                    known_good_urls.add(u)
+        # 本轮真实生成的图片链接：工具成功返回后累积（防幻觉守卫用，避免误拦真实结果）
+        run_real_urls = set()
+
         # ---- 初始化消息：system + 历史 + 动态上下文 + 高亮指令 ----
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt},
@@ -116,7 +188,15 @@ class ReActLoop:
         for msg in history:
             if msg is None:
                 continue
-            messages.append({"role": msg.role, "content": msg.content})
+            content = msg.content
+            ref_images = [str(u) for u in (msg.images or []) if str(u).strip()]
+            if ref_images:
+                content = (
+                    f"{content}\n\n【用户上传的参考图】（图生图/多图生图用，"
+                    f"直接传给 edit_product_image 的 image_urls 参数）\n"
+                    + "\n".join(f"- {u}" for u in ref_images)
+                )
+            messages.append({"role": msg.role, "content": content})
 
         if self._dynamic_context:
             messages.append({
@@ -158,6 +238,7 @@ class ReActLoop:
         }
         cognition_records: List[str] = []
         loop_exhausted = False
+        guard_retries = 2
 
         # ---- 主循环 ----
         for turn in range(self._max_steps):
@@ -277,9 +358,34 @@ class ReActLoop:
                         cognition_records.extend(summary.get("records", []))
                         yield {"type": "cognition", **summary}
 
-            # ---- 无工具调用 → 完成 ----
+            # ---- 无工具调用 → 完成（防幻觉：生图意图但未调用工具 → 强制纠正重试） ----
             if not current_tool_calls:
                 final_content = full_visible or assistant_content
+                latest_user = (
+                    history[-1].content
+                    if history and history[-1] and history[-1].role == "user"
+                    else ""
+                )
+                urls_in_reply = _extract_agnes_urls(final_content)
+                if (
+                    guard_retries > 0
+                    and _looks_like_image_intent(latest_user)
+                    and (urls_in_reply - run_real_urls)
+                ):
+                    guard_retries -= 1
+                    logger.warning(
+                        "[ReAct] 检测到未调用工具却输出图片链接，触发纠正重试"
+                    )
+                    yield {
+                        "type": "tool_retry",
+                        "note": "检测到疑似编造的图片链接：未调用生图工具却输出了图片链接，已强制要求调用工具",
+                    }
+                    full_visible = ""
+                    messages.append({
+                        "role": "system",
+                        "content": _IMAGE_GUARD_CORRECTION,
+                    })
+                    continue
                 messages.append({"role": "assistant", "content": final_content})
                 break
 
@@ -293,6 +399,7 @@ class ReActLoop:
             })
 
             tool_results_for_turn: List[Dict[str, Any]] = []
+            skip_turn = False
             for tc in current_tool_calls:
                 func = tc.get("function") or {}
                 tool_name = func.get("name", "")
@@ -303,6 +410,26 @@ class ReActLoop:
 
                 if not tool_name:
                     continue
+
+                if tool_name in _IMAGE_REF_TOOLS:
+                    bad_refs = _invalid_image_refs(tool_args, known_good_urls)
+                    if bad_refs:
+                        logger.warning(
+                            "[ReAct] 参考图链接无效，拒绝执行: %s", bad_refs
+                        )
+                        yield {
+                            "type": "tool_retry",
+                            "note": "参考图链接无效（编造或失效），已阻止执行并强制纠正",
+                        }
+                        messages.pop()
+                        messages.append({
+                            "role": "system",
+                            "content": _IMAGE_REF_GUARD_CORRECTION.format(
+                                bad=", ".join(bad_refs)
+                            ),
+                        })
+                        skip_turn = True
+                        break
 
                 yield {"type": "tool_call", "name": tool_name, "args": tool_args}
 
@@ -332,6 +459,9 @@ class ReActLoop:
                     "error": exec_result.error if not exec_result.success else None,
                 })
                 self._all_tool_results.append(tool_results_for_turn[-1])
+                if exec_result.success:
+                    known_good_urls.update(_extract_agnes_urls(obs["content"]))
+                    run_real_urls.update(_extract_agnes_urls(obs["content"]))
                 if self._execution_log is not None:
                     self._execution_log.append(
                         session_id=self._session_id,
@@ -352,6 +482,9 @@ class ReActLoop:
                             "tool_call_id": tool_call_id,
                         },
                     )
+
+            if skip_turn:
+                continue
 
             # ---- Reflect ----
             if self._llm_reflect_enabled:

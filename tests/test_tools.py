@@ -80,3 +80,17 @@ class TestExecutor:
         result = run(executor.execute("slow", {}, timeout_seconds=0.5))
         assert not result.success
         assert result.error_code == "TIMEOUT"
+
+    def test_timeout_per_tool_override(self):
+        registry = ToolRegistry()
+        registry.register(
+            "slow",
+            lambda args: time.sleep(1),
+            schema={"type": "function"},
+            timeout_seconds=0.2,
+        )
+        executor = ToolExecutor(registry)
+        # 调用方传入更大的默认超时，仍按工具自身超时熔断
+        result = run(executor.execute("slow", {}, timeout_seconds=10))
+        assert not result.success
+        assert result.error_code == "TIMEOUT"

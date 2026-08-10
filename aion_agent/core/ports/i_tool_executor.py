@@ -38,7 +38,7 @@ class IToolExecutor(ABC):
         self,
         tool_name: str,
         args: Dict[str, Any],
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 120,
     ) -> ToolResult:
         """执行工具"""
         ...

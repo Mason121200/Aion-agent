@@ -27,6 +27,7 @@ class ToolRegistry(IToolRegistry):
         schema: Optional[Dict[str, Any]] = None,
         permission: str = "auto",
         level: str = "skill",
+        timeout_seconds: Optional[int] = None,
     ) -> None:
         if level not in ("system", "builtin", "skill"):
             level = "skill"
@@ -43,6 +44,7 @@ class ToolRegistry(IToolRegistry):
             "schema": schema,
             "permission": permission if permission in ("auto", "confirm") else "auto",
             "level": level,
+            "timeout_seconds": timeout_seconds,
         }
 
     def get(self, name: str) -> Optional[Dict[str, Any]]:

@@ -73,7 +73,7 @@ class ToolExecutor(IToolExecutor):
         self,
         tool_name: str,
         args: Dict[str, Any],
-        timeout_seconds: int = 30,
+        timeout_seconds: int = 120,
     ) -> ToolResult:
         entry = self._registry.get(tool_name)
         if entry is None:
@@ -112,6 +112,9 @@ class ToolExecutor(IToolExecutor):
             )
 
         clean_args = args or {}
+        entry_timeout = entry.get("timeout_seconds")
+        if entry_timeout is not None:
+            timeout_seconds = int(entry_timeout)
         try:
             result = await asyncio.wait_for(
                 asyncio.to_thread(handler, clean_args),

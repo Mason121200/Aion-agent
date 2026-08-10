@@ -23,6 +23,7 @@ def build_default_skills(
     from aion_agent.tools.cognition_tools import register_cognition_tools
     from aion_agent.tools.planner_tools import register_planner_tools
     from aion_agent.tools.study_tools import register_study_tools
+    from aion_agent.ecommerce.ecommerce_tools import register_ecommerce_tools
 
     skills: List[Skill] = [
         Skill(
@@ -87,4 +88,16 @@ def build_default_skills(
                 ),
             )
         )
+    skills.append(
+        Skill(
+            name="ecommerce",
+            version="1.0.0",
+            description="电商场景：商品图生成 / 商品图编辑 / 商品视频（Agnes）",
+            tools=[
+                "generate_product_image", "edit_product_image",
+                "submit_product_video", "generation_status",
+            ],
+            register_func=register_ecommerce_tools,
+        )
+    )
     return skills

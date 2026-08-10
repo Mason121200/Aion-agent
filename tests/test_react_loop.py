@@ -353,3 +353,148 @@ class TestReActChatSession:
         assert not cog_events
         triples = run(repo.retrieve("u1", query="*")) or []
         assert not any(t.subject == "用户" and "什么" in t.object for t in triples)
+
+
+class TestImageGenGuard:
+    """生图幻觉守卫：未调用工具却输出图片链接 → 强制纠正重试；无效参考图链接 → 拦截"""
+
+    REAL_URL = "https://platform-outputs.agnes-ai.space/images/i2i/task_REAL/output.png"
+
+    def _loop(self, llm, history=None):
+        from aion_agent.ecommerce import agnes_client
+        from aion_agent.ecommerce.ecommerce_tools import register_ecommerce_tools
+        registry = ToolRegistry()
+        register_ecommerce_tools(registry)
+        executor = ToolExecutor(registry)
+        repo = InMemoryCognitiveRepo()
+        pipeline = CognitionPipeline(cognitive_repo=repo)
+        loop = ReActLoop(
+            llm_client=llm,
+            history=history or [],
+            user_id="u1",
+            session_id="s1",
+            system_prompt="你是助手",
+            pipeline=pipeline,
+            tool_registry=registry,
+            tool_executor=executor,
+        )
+        return run(_collect(loop)), repo
+
+    def test_fabricated_url_triggers_retry_and_calls_tool(self, monkeypatch):
+        from aion_agent.ecommerce import agnes_client
+        monkeypatch.setattr(
+            agnes_client, "generate_image",
+            lambda prompt, size="1024x768", ref_images=None: self.REAL_URL,
+        )
+        history = [
+            Message(session_id="s1", role="user",
+                    content="帮我重新生成一张商品图，提升清晰度")
+        ]
+        llm = FakeAsyncLLM([
+            {"content": f"好的，已生成：{self.REAL_URL}", "tool_calls": None},
+            {
+                "content": "我来调用工具。",
+                "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {"name": "edit_product_image",
+                                 "arguments": {"prompt": "提升清晰度",
+                                               "image_urls": ["/uploads/a.png"]}},
+                }],
+            },
+            {"content": f"已生成高清版：{self.REAL_URL}"},
+        ])
+        events, _ = self._loop(llm, history=history)
+        types = [e["type"] for e in events]
+        assert "tool_retry" in types
+        assert types.count("tool_call") == 1
+        assert types.count("tool_result") == 1
+        final = [e for e in events if e["type"] == "final"][0]
+        assert self.REAL_URL in final["content"]
+        # 纠正指令注入到第二轮请求
+        assert any(
+            m.get("role") == "system" and "纠正" in m.get("content", "")
+            for m in llm.requests[1]
+        )
+
+    def test_invalid_ref_url_is_blocked(self, monkeypatch):
+        from aion_agent.ecommerce import agnes_client
+        monkeypatch.setattr(
+            agnes_client, "generate_image",
+            lambda prompt, size="1024x768", ref_images=None: self.REAL_URL,
+        )
+        fake_url = "https://platform-outputs.agnes-ai.space/images/i2i/task_FAKE/output.png"
+        history = [
+            Message(session_id="s1", role="assistant",
+                    content="旧图", images=[self.REAL_URL]),
+            Message(session_id="s1", role="user", content="基于这张图重新生成"),
+        ]
+        llm = FakeAsyncLLM([
+            {
+                "content": "调用工具。",
+                "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {"name": "edit_product_image",
+                                 "arguments": {"prompt": "改背景",
+                                               "image_urls": [fake_url]}},
+                }],
+            },
+            {
+                "content": "改用上传图。",
+                "tool_calls": [{
+                    "id": "c2", "type": "function",
+                    "function": {"name": "edit_product_image",
+                                 "arguments": {"prompt": "改背景",
+                                               "image_urls": ["/uploads/a.png"]}},
+                }],
+            },
+            {"content": f"完成：{self.REAL_URL}"},
+        ])
+        events, _ = self._loop(llm, history=history)
+        types = [e["type"] for e in events]
+        assert "tool_retry" in types
+        # 带假链接的调用被拦截，只执行了一次真实调用
+        calls = [e for e in events if e["type"] == "tool_call"]
+        assert len(calls) == 1
+        assert calls[0]["args"]["image_urls"] == ["/uploads/a.png"]
+        final = [e for e in events if e["type"] == "final"][0]
+        assert self.REAL_URL in final["content"]
+        # 拦截后第二轮请求包含参考图纠正指令
+        assert any(
+            m.get("role") == "system" and "无效的参考图链接" in m.get("content", "")
+            for m in llm.requests[1]
+        )
+
+    def test_no_intent_does_not_retry(self):
+        history = [Message(session_id="s1", role="user", content="你好")]
+        llm = FakeAsyncLLM([
+            {"content": f"这是一张参考图：{self.REAL_URL}", "tool_calls": None}
+        ])
+        events, _ = self._loop(llm, history=history)
+        assert "tool_retry" not in [e["type"] for e in events]
+
+    def test_successful_tool_result_not_retried(self, monkeypatch):
+        """工具本轮真实返回的链接，不会被幻觉守卫误拦"""
+        from aion_agent.ecommerce import agnes_client
+        monkeypatch.setattr(
+            agnes_client, "generate_image",
+            lambda prompt, size="1024x768", ref_images=None: self.REAL_URL,
+        )
+        history = [
+            Message(session_id="s1", role="user", content="生成一张商品图")
+        ]
+        llm = FakeAsyncLLM([
+            {
+                "content": "调用工具。",
+                "tool_calls": [{
+                    "id": "c1", "type": "function",
+                    "function": {"name": "generate_product_image",
+                                 "arguments": {"prompt": "白色保温杯"}},
+                }],
+            },
+            {"content": f"已生成：{self.REAL_URL}"},
+        ])
+        events, _ = self._loop(llm, history=history)
+        types = [e["type"] for e in events]
+        assert "tool_retry" not in types
+        final = [e for e in events if e["type"] == "final"][0]
+        assert self.REAL_URL in final["content"]
