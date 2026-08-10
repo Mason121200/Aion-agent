@@ -487,3 +487,15 @@ html.apk.kb-open #composer { bottom: 10px; }
 html.apk.kb-open #attachments { bottom: calc(10px + 66px); }
 html.apk.kb-open #view-chat { padding-bottom: 100px; }
 html.apk.kb-open #toast { bottom: 96px; }
+
+/* ---------- 原生触感：去点击闪白、去选中、快速响应 ---------- */
+* { -webkit-tap-highlight-color: transparent; }
+button, .tab, .icon-btn, .btn-mini, .del-btn, .pin-btn, .lb-save, .lb-close {
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+#input, textarea, input[type="text"] {
+  user-select: text;
+  -webkit-user-select: text;
+}

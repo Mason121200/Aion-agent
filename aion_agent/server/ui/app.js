@@ -1431,10 +1431,28 @@ function showConfigBanner(detail) {
   if (closeBtn) closeBtn.addEventListener("click", () => els.configBanner.classList.add("hidden"));
 }
 
+/* APK：原生返回键优先关闭弹层/大图 */
+window.__aionConsumeBack = function () {
+  const lb = document.querySelector(".lightbox");
+  if (lb) { lb.remove(); return true; }
+  const sheet = document.getElementById("session-sheet");
+  if (sheet && !sheet.classList.contains("hidden")) {
+    closeSheet();
+    return true;
+  }
+  const banner = els.configBanner;
+  if (banner && !banner.classList.contains("hidden")) {
+    banner.classList.add("hidden");
+    return true;
+  }
+  return false;
+};
+
 /* ---------- 初始化 ---------- */
 
 async function init() {
-  if ("serviceWorker" in navigator) {
+  // APK: skip Service Worker to avoid stale cache overriding new frontend
+  if (!IS_APK && "serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   }
   try {
@@ -1499,6 +1517,7 @@ els.attach.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", async () => {
   const files = Array.from(els.fileInput.files || []);
   els.fileInput.value = "";
+  if (!files.length) { toast("未获取到图片数据，请重试", 3000); return; }
   for (const f of files) {
     console.log("[upload]", f && f.name, f && f.type, f && f.size);
     // WebView 从相册选择的文件可能没有 MIME 类型：只在明确非图片时拒绝，其余交给后端校验

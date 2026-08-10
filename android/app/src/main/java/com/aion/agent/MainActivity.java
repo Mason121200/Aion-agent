@@ -70,6 +70,8 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> uploadCallback;
     private volatile String pendingSaveUrl;
     private volatile String pendingSaveName;
+    private LinearLayout nativeBar;
+    private android.widget.ProgressBar progressBar;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -110,6 +112,7 @@ public class MainActivity extends Activity {
         root.addView(bar, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
+        nativeBar = bar;
 
         // 启动状态
         statusText = new TextView(this);
@@ -119,6 +122,15 @@ public class MainActivity extends Activity {
         statusText.setPadding(dp(14), dp(10), dp(14), dp(6));
         root.addView(statusText);
 
+        // 加载进度条（原生质感）
+        progressBar = new android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progressBar.setMax(100);
+        progressBar.setVisibility(View.GONE);
+        progressBar.getProgressDrawable().setColorFilter(
+                Color.parseColor("#4f7cff"), android.graphics.PorterDuff.Mode.SRC_IN);
+        root.addView(progressBar, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(3)));
+
         // WebView
         webView = new WebView(this);
         WebView.setWebContentsDebuggingEnabled(true);
@@ -126,7 +138,36 @@ public class MainActivity extends Activity {
         ws.setJavaScriptEnabled(true);
         ws.setDomStorageEnabled(true);
         ws.setDatabaseEnabled(true);
-        webView.setWebViewClient(new WebViewClient());
+        ws.setSupportZoom(false);
+        ws.setBuiltInZoomControls(false);
+        ws.setDisplayZoomControls(false);
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                return openExternal(url);
+            }
+
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, android.webkit.WebResourceRequest request) {
+                if (!request.isForMainFrame()) {
+                    return false;
+                }
+                return openExternal(request.getUrl().toString());
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                if (nativeBar != null && url != null && url.startsWith("http://127.0.0.1")) {
+                    nativeBar.setVisibility(View.GONE);
+                    if (statusText != null) {
+                        statusText.setVisibility(View.GONE);
+                    }
+                }
+            }
+        });
+        webView.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        webView.setVerticalScrollBarEnabled(false);
+        webView.setHorizontalScrollBarEnabled(false);
 
         webView.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -183,6 +224,16 @@ public class MainActivity extends Activity {
                 return true;
             }
             @Override
+            public void onProgressChanged(WebView view, int newProgress) {
+                if (newProgress >= 100) {
+                    progressBar.setVisibility(View.GONE);
+                } else {
+                    progressBar.setVisibility(View.VISIBLE);
+                    progressBar.setProgress(newProgress);
+                }
+            }
+
+            @Override
             public boolean onConsoleMessage(android.webkit.ConsoleMessage consoleMessage) {
                 Log.d("AionWeb", consoleMessage.message()
                         + " [" + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + "]");
@@ -200,10 +251,20 @@ public class MainActivity extends Activity {
                     if (imgUrl != null) {
                         new AlertDialog.Builder(MainActivity.this)
                                 .setTitle("\u56fe\u7247\u64cd\u4f5c")
-                                .setItems(new String[]{"\u4fdd\u5b58\u56fe\u7247\u5230\u76f8\u518c"}, new android.content.DialogInterface.OnClickListener() {
+                                .setItems(new String[]{"\u4fdd\u5b58\u56fe\u7247\u5230\u76f8\u518c", "\u5206\u4eab\u56fe\u7247\u94fe\u63a5"}, new android.content.DialogInterface.OnClickListener() {
                                     @Override
                                     public void onClick(android.content.DialogInterface dialog, int which) {
-                                        saveImageToPhoneAsync(imgUrl, guessImageName(imgUrl));
+                                        if (which == 0) {
+                                            saveImageToPhoneAsync(imgUrl, guessImageName(imgUrl));
+                                        } else {
+                                            Intent share = new Intent(Intent.ACTION_SEND);
+                                            share.setType("text/plain");
+                                            share.putExtra(Intent.EXTRA_TEXT, imgUrl);
+                                            try {
+                                                startActivity(Intent.createChooser(share, "\u5206\u4eab\u56fe\u7247"));
+                                            } catch (Exception ignored) {
+                                            }
+                                        }
                                     }
                                 })
                                 .show();
@@ -244,6 +305,18 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
+        // 原生质感：状态栏/导航栏与 App 背景同色，浅色图标
+        getWindow().setStatusBarColor(Color.parseColor("#f2f4f8"));
+        if (Build.VERSION.SDK_INT >= 26) {
+            getWindow().setNavigationBarColor(Color.parseColor("#f2f4f8"));
+        }
+        if (Build.VERSION.SDK_INT >= 23) {
+            int sysFlags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= 26) {
+                sysFlags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            }
+            getWindow().getDecorView().setSystemUiVisibility(sysFlags);
+        }
 
         startLocalEngine();
     }
@@ -297,6 +370,23 @@ public class MainActivity extends Activity {
                 }
             }
         }).start();
+    }
+
+    /** 本地服务留在 WebView；外链交给系统浏览器 */
+    private boolean openExternal(String url) {
+        if (url == null) {
+            return false;
+        }
+        if (url.startsWith("http://127.0.0.1") || url.startsWith("http://localhost")
+                || url.startsWith("file://") || url.startsWith("data:")) {
+            return false;
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Exception e) {
+            return false;
+        }
+        return true;
     }
 
     private boolean healthOk() {
@@ -702,10 +792,21 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) {
-            webView.goBack();
-        } else {
-            super.onBackPressed();
-        }
+        // 优先关闭弹层/大图预览，再返回历史，最后退出应用
+        webView.evaluateJavascript(
+                "(function(){ try { return window.__aionConsumeBack ? !!window.__aionConsumeBack() : false; } catch(e){ return false; } })();",
+                new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        if ("true".equals(value)) {
+                            return;
+                        }
+                        if (webView.canGoBack()) {
+                            webView.goBack();
+                        } else {
+                            MainActivity.super.onBackPressed();
+                        }
+                    }
+                });
     }
 }
