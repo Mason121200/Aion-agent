@@ -4,8 +4,7 @@
 - 精确去重：相同 (subject, predicate, object) 只保留第一条
 - 语义去重：启用 embedder 时，两两余弦相似度 > 0.85 视为重复（保留前者）
 
-与存储层精确去重的分工：本过滤器负责「本条认知块内」与「跨会话候选」去重，
-存储层负责最终落库时的精确合并（save_triple 的 max-confidence + usage+1）。
+职责边界（2026-08-10 审查确认）：本过滤器只针对「新增数据」去重，existing_items 只读、不修改库内数据；当前生产链路未传入 existing_items（跨批次去重休眠），落库精确合并由存储层负责（save_triple 的 max-confidence + usage+1）。
 """
 
 from __future__ import annotations
